@@ -1,0 +1,33 @@
+# Byte-compiled / optimized / DLL files (Python)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables & Sensitive data (BẢO MẬT API KEY & COOKIES)
+.env
+.env.local
+cookies.txt
+
+# Virtual Environments (Môi trường ảo)
+.venv/
+venv/
+ENV/
+env/
+
+# Output & Temporary Data (Thư mục chứa video/audio xuất ra)
+output/
+temp/
+tmp/
+
+# IDE / Editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log

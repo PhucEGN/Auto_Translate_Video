@@ -1,0 +1,9 @@
+python-dotenv
+yt-dlp>=2024.0.0
+groq
+edge-tts
+mutagen
+pydub
+audioop-lts
+tqdm
+requests
