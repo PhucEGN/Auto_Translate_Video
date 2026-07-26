@@ -200,7 +200,7 @@ class VideoDownloader:
         # Cấu hình tải chính
         ydl_opts = {
             'outtmpl': str(folder_path / 'file.%(ext)s'),
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'format': 'best[vcodec~=h264][acodec!=none]/best[vcodec!=none][acodec!=none]/best',
             'merge_output_format': 'mp4',
             'overwrite': True,
             'quiet': True,
