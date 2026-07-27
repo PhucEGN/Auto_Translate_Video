@@ -1,28 +1,103 @@
-import asyncio
 import json
+import re
 import sys
 from pathlib import Path
-from typing import Optional
-import edge_tts
+from typing import List, Optional, Dict, Any
+import numpy as np
+from pydub import AudioSegment
+from vieneu import Vieneu
 
 # Đảm bảo import và sử dụng thông tin từ config
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 import config
 
 
+def clean_text_for_display(text: str) -> str:
+    """Xóa các nhãn biểu cảm [cười], [thở dài]... để dùng làm phụ đề hiển thị sạch."""
+    return re.sub(r"\[.*?\]", "", text).strip()
+
+
+def condense_vietnamese_text(text: str) -> str:
+    """
+    Tự động lọc bớt các từ đệm/từ nối không bắt buộc trong tiếng Việt 
+    khi phát hiện câu bị quá dài so với thời lượng video gốc.
+    """
+    # Lưu lại các nhãn biểu cảm để không làm mất hiệu ứng Vieneu
+    tags = re.findall(r"\[.*?\]", text)
+    clean_txt = re.sub(r"\[.*?\]", " __TAG__ ", text)
+
+    # Danh sách các từ đệm có thể bỏ bớt mà không làm mất nghĩa cốt lõi
+    filler_words = [
+        r"\bthì\b", r"\blà\b", r"\bmà\b", r"\brằng\b", r"\bđó\b", 
+        r"\bhãy\b", r"\bnhé\b", r"\bnha\b", r"\bấy\b", r"\bđấy\b"
+    ]
+    
+    for filler in filler_words:
+        clean_txt = re.sub(filler, "", clean_txt, flags=re.IGNORECASE)
+
+    # Trả lại các nhãn biểu cảm vào đúng vị trí
+    for tag in tags:
+        clean_txt = clean_txt.substitute("__TAG__", tag) if hasattr(clean_txt, 'substitute') else clean_txt.replace("__TAG__", tag, 1)
+
+    # Làm sạch khoảng trắng thừa
+    return re.sub(r"\s+", " ", clean_txt).strip()
+
+
+def process_audio_smooth(
+    wave_data: np.ndarray, 
+    sample_rate: int = 48000, 
+    pad_tail_ms: int = 150,
+    fade_ms: int = 20
+) -> AudioSegment:
+    """
+    Xử lý mượt biên độ âm thanh:
+    - Chuyển float32 sang PCM int16.
+    - Áp dụng Fade In/Out cực nhẹ để triệt tiêu tiếng ngắt giật (click/pop).
+    - Thêm một chút padding cuối câu để nhịp ngắt câu tự nhiên.
+    """
+    wave_int16 = (np.clip(wave_data, -1.0, 1.0) * 32767).astype(np.int16)
+
+    audio = AudioSegment(
+        data=wave_int16.tobytes(),
+        sample_width=2,
+        frame_rate=sample_rate,
+        channels=1
+    )
+
+    if len(audio) > (fade_ms * 2):
+        audio = audio.fade_in(fade_ms).fade_out(fade_ms)
+
+    if pad_tail_ms > 0:
+        silence = AudioSegment.silent(duration=pad_tail_ms, frame_rate=sample_rate)
+        audio = audio + silence
+
+    return audio
+
+
 class SegmentTTSGenerator:
-    """Class tạo giọng đọc AI tiếng Việt theo từng segment dựa vào mốc thời gian."""
+    """
+    Class tạo giọng đọc AI tiếng Việt theo từng segment (Sử dụng Vieneu trên GPU).
+    Tích hợp tự động tối ưu nhịp điệu, chống méo tiếng và xuất định dạng MP3.
+    """
 
-    def __init__(self, voice: Optional[str] = None):
-        # Lấy cấu hình giọng đọc từ config, mặc định dùng giọng Nữ Hoài My (vi-VN-HoaiMyNeural)
-        # Giọng Nam gợi ý: 'vi-VN-NamMinhNeural'
-        self.voice = voice if voice else getattr(config, "DEFAULT_VOICE", "vi-VN-HoaiMyNeural")
+    def __init__(
+        self, 
+        voice: Optional[str] = None, 
+        style: str = "tu_nhien", 
+        sample_rate: int = 48000,
+        max_words_per_sec: float = 3.5,  # Tốc độ an toàn tối đa (từ/giây) chống méo tiếng
+        pad_tail_ms: int = 150,
+        vieneu_instance: Optional[Vieneu] = None
+    ):
+        self.voice = voice if voice else getattr(config, "DEFAULT_VOICE", "Trúc Ly")
+        self.style = style
+        self.sample_rate = sample_rate
+        self.max_words_per_sec = max_words_per_sec
+        self.pad_tail_ms = pad_tail_ms
+        self.vieneu = vieneu_instance if vieneu_instance is not None else Vieneu()
 
-    def generate_speech_for_segments(self, json_path: Path, verbose: bool = True) -> list:
-        """Đọc info.json, sinh giọng đọc tiếng Việt cho từng câu và cập nhật lại file JSON."""
-        return asyncio.run(self._process_segments(json_path, verbose))
-
-    async def _process_segments(self, json_path: Path, verbose: bool) -> list:
+    def generate_speech_for_segments(self, json_path: Path, verbose: bool = True) -> List[Dict[str, Any]]:
+        """Đọc info.json, tối ưu văn bản, sinh giọng đọc Vieneu MP3 và cập nhật lại file JSON."""
         json_path = Path(json_path)
         if not json_path.exists():
             raise FileNotFoundError(f"❌ Không tìm thấy file JSON tại: {json_path}")
@@ -38,34 +113,79 @@ class SegmentTTSGenerator:
                 print("⚠️ Không tìm thấy 'segments' trong info.json!")
             return []
 
-        # Tạo thư mục con chứa các file âm thanh tiếng Việt đã chuyển đổi
         tts_dir = folder_path / "translated_audio_segments"
         tts_dir.mkdir(parents=True, exist_ok=True)
 
-        if verbose:
-            print(f"🔊 [TTS] Bắt đầu tạo giọng đọc ({self.voice}) cho {len(segments)} segments...")
+        valid_segments = []
+        text_list = []
 
+        # 1. Tiền xử lý văn bản & Kiểm tra nguy cơ méo tiếng
         for seg in segments:
-            seg_id = seg.get("id", 0)
-            
-            # Lấy câu tiếng Việt đã dịch ở bước Translator
             vi_text = seg.get("translated_text", "").strip()
             if not vi_text:
                 continue
 
+            # Tính thời lượng mong muốn của segment (nếu JSON gốc có timestamp start/end)
+            start_time = seg.get("start", 0.0)
+            end_time = seg.get("end", 0.0)
+            duration = max(end_time - start_time, 0.5)
+
+            # Đếm số từ thực tế (loại trừ các nhãn biểu cảm)
+            clean_words = clean_text_for_display(vi_text).split()
+            word_count = len(clean_words)
+
+            # Cảnh báo & Tự động cô đọng nếu tốc độ nói vượt ngưỡng an toàn
+            if duration > 0.5 and (word_count / duration) > self.max_words_per_sec:
+                if verbose:
+                    print(f"⚠️ [Seg {seg.get('id')}] Phát hiện nguy cơ méo tiếng ({word_count} từ / {duration:.1f}s). Đang tự động rút gọn...")
+                vi_text = condense_vietnamese_text(vi_text)
+
+            # Thêm dấu ngắt câu tự nhiên nếu thiếu
+            if not vi_text.endswith((".", "!", "?", "...", "]")):
+                vi_text += "."
+
+            seg["processed_text"] = vi_text
+            valid_segments.append(seg)
+            text_list.append(vi_text)
+
+        if not text_list:
+            if verbose:
+                print("⚠️ Không có câu thoại nào hợp lệ để tạo giọng đọc!")
+            return segments
+
+        if verbose:
+            print(f"🔊 [Vieneu Smooth TTS] Bắt đầu tạo {len(text_list)} segments ({self.voice}) trên GPU...")
+
+        # 2. Chạy Batch Inference trên GPU bằng Vieneu
+        raw_audios = self.vieneu.infer_batch(
+            text_list, 
+            voice=self.voice, 
+            style=self.style
+        )
+
+        # 3. Xử lý âm thanh mượt mà và lưu file MP3
+        for seg, wave in zip(valid_segments, raw_audios):
+            seg_id = seg.get("id", 0)
             output_filename = f"vi_seg_{seg_id:03d}.mp3"
             output_filepath = tts_dir / output_filename
 
-            # Sinh audio tiếng Việt cho phân đoạn này
-            await self._create_single_tts(vi_text, output_filepath)
+            # Áp dụng thuật toán làm mượt chống méo/nổ tiếng
+            smooth_audio = process_audio_smooth(
+                wave_data=wave,
+                sample_rate=self.sample_rate,
+                pad_tail_ms=self.pad_tail_ms
+            )
 
-            # Cập nhật đường dẫn tương đối vào segment
+            # Xuất file MP3 chất lượng cao
+            smooth_audio.export(str(output_filepath), format="mp3", bitrate="192k")
+
+            # Cập nhật thông tin vào object segment
             seg["translated_audio_file"] = f"translated_audio_segments/{output_filename}"
-            
-            if verbose:
-                print(f"  ✨ [Seg {seg_id}] Đã tạo âm thanh: {output_filename}")
 
-        # Cập nhật thông tin vào info.json
+            if verbose:
+                print(f"  ✨ [Seg {seg_id}] Đã xuất MP3 mượt: {output_filename}")
+
+        # 4. Cập nhật lại file info.json
         data["segments"] = segments
         data["status"] = "tts_generated"
 
@@ -73,33 +193,27 @@ class SegmentTTSGenerator:
             json.dump(data, f, ensure_ascii=False, indent=4)
 
         if verbose:
-            print(f"\n✅ Đã tạo xong toàn bộ {len(segments)} file âm thanh lồng tiếng!")
+            print(f"\n✅ Đã hoàn thành toàn bộ {len(valid_segments)} file MP3 lồng tiếng!")
             print(f"📂 Thư mục chứa: {tts_dir.name}")
-            print(f"📝 Đã cập nhật file: {json_path.name}\n")
+            print(f"📝 Cập nhật thành công: {json_path.name}\n")
 
         return segments
 
-    async def _create_single_tts(self, text: str, output_path: Path):
-        """Hàm bất đồng bộ gọi Edge-TTS sinh file mp3 cho 1 câu."""
-        communicate = edge_tts.Communicate(text, self.voice)
-        await communicate.save(str(output_path))
-
 
 if __name__ == "__main__":
-    # Tự động tìm folder gần nhất trong TEMP_DIR để test
     temp_dir = getattr(config, "TEMP_DIR", Path("output/temp"))
-    
+
     if temp_dir.exists():
         subdirs = sorted([d for d in temp_dir.iterdir() if d.is_dir()], key=lambda x: x.stat().st_mtime, reverse=True)
-        
+
         if subdirs:
             target_folder = subdirs[0]
             target_json = target_folder / "info.json"
 
             if target_json.exists():
-                print(f"🔍 Đang chạy test TTS Generator trên folder: {target_folder.name}\n")
-                
-                tts = SegmentTTSGenerator()
+                print(f"🔍 Đang chạy test Vieneu TTS Generator trên folder: {target_folder.name}\n")
+
+                tts = SegmentTTSGenerator(voice="Trúc Ly")
                 tts.generate_speech_for_segments(json_path=target_json, verbose=True)
             else:
                 print(f"❌ Không tìm thấy file 'info.json' trong folder: {target_folder}")

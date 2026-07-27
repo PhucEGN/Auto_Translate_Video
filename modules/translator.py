@@ -2,259 +2,167 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Optional
-from groq import Groq
+from typing import List, Dict, Any, Tuple
+import requests
 
-# Đảm bảo import và sử dụng thông tin từ config
+# Import cấu hình
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 import config
 
 
 class SegmentTranslator:
-    """Class quản lý việc dịch văn bản từng segment từ ngôn ngữ gốc sang tiếng Việt."""
+    """Module dịch ngữ cảnh tự động gộp các câu thoại quá ngắn/quá nhanh trước khi dịch."""
 
-    def __init__(self, api_key: Optional[str] = None):
-        # Lấy API Key trực tiếp từ config
-        self.api_key = api_key if api_key else getattr(config, "GROQ_API_KEY", None)
-        if not self.api_key:
-            raise ValueError("❌ Không tìm thấy GROQ_API_KEY trong config.py!")
+    def __init__(self, api_key: str = None, min_segment_duration: float = 1.2):
+        """
+        - min_segment_duration: Thời lượng tối thiểu (giây). 
+          Nếu 1 segment ngắn hơn mức này, hệ thống sẽ đề xuất gộp với segment kế tiếp.
+        """
+        self.api_key = api_key if api_key else getattr(config, "GROQ_API_KEY", "")
+        self.min_duration = min_segment_duration
 
-        self.client = Groq(api_key=self.api_key)
+    def _merge_fast_segments(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Thuật toán gom cụm: Phát hiện các câu nói quá nhanh/quắn câu và gộp 
+        thời lượng (start-end) cùng văn bản gốc lại thành 1 segment thống nhất.
+        """
+        if not segments:
+            return []
 
-    def _split_long_or_list_segment(self, segments: list) -> list:
-        """Tự động kiểm tra và tách các segment bị Whisper gom cục (ví dụ: chuỗi từ vựng cách nhau bằng dấu phẩy 、, hoặc ,)."""
-        if len(segments) != 1:
-            return segments
+        merged = []
+        curr = segments[0].copy()
 
-        single_seg = segments[0]
-        raw_text = single_seg.get("text", "").strip()
+        for next_seg in segments[1:]:
+            curr_duration = curr.get("end", 0.0) - curr.get("start", 0.0)
+            
+            # Tính khoảng nghỉ giữa 2 câu
+            gap = next_seg.get("start", 0.0) - curr.get("end", 0.0)
 
-        # Tách chuỗi theo dấu phẩy tiếng Trung (、), dấu phẩy thường (,), hoặc chấm phẩy (;)
-        items = [
-            item.strip()
-            for item in re.split(r"[、,;，]+", raw_text)
-            if item.strip()
-        ]
+            # ĐIỀU KIỆN GỘP: 
+            # 1. Câu hiện tại quá ngắn (< min_duration) HOẶC câu nối tiếp quá ngắn
+            # 2. VÀ Khoảng nghỉ giữa 2 câu rất nhỏ (< 0.5s) để đảm bảo tính liền mạch
+            if (curr_duration < self.min_duration or (next_seg.get("end", 0.0) - next_seg.get("start", 0.0)) < self.min_duration) and gap < 0.5:
+                # Gộp text gốc
+                curr["text"] = f"{curr.get('text', '').strip()} {next_seg.get('text', '').strip()}"
+                # Cập nhật mốc thời gian kết thúc
+                curr["end"] = next_seg.get("end", curr.get("end"))
+            else:
+                merged.append(curr)
+                curr = next_seg.copy()
 
-        # Nếu chỉ có 1 từ/câu đơn lẻ thực sự, không làm gì cả
-        if len(items) <= 1:
-            return segments
+        merged.append(curr)
 
-        # Nếu phát hiện danh sách gồm nhiều từ/câu, bổ nhỏ segment ra
-        total_duration = single_seg.get("end", 0) - single_seg.get("start", 0)
-        total_chars = max(len(raw_text), 1)
+        # Đánh lại ID cho các segment sau khi gộp
+        for idx, seg in enumerate(merged):
+            seg["id"] = idx
 
-        new_segments = []
-        current_start = single_seg.get("start", 0)
+        return merged
 
-        for idx, item in enumerate(items):
-            item_duration = (len(item) / total_chars) * total_duration
-            current_end = round(current_start + item_duration, 2)
-
-            new_segments.append(
-                {
-                    "id": idx,
-                    "start": round(current_start, 2),
-                    "end": current_end,
-                    "text": item,
-                }
-            )
-            current_start = current_end
-
-        return new_segments
-
-    def _translate_batch(self, batch_segments: list, target_lang: str) -> dict:
-        """Hàm trợ lý dịch một nhóm (batch) câu để tránh quá tải Token limit của LLM."""
-        if not batch_segments:
-            return {}
-
-        # 1. Tạo bản đồ tạm: Đánh số index từ 0 -> len-1 để gửi cho LLM
-        temp_items = []
-        index_to_original_id = {}
-
-        for idx, seg in enumerate(batch_segments):
-            temp_items.append({"id": idx, "text": seg.get("text", "")})
-            index_to_original_id[idx] = seg.get("id")
-
-        total_items = len(temp_items)
-
-        # 2. Prompt chuẩn hóa và bắt buộc cấu trúc rõ ràng
-        prompt = f"""Bạn là một biên dịch viên chuyên nghiệp. Hãy dịch danh sách các từ vựng hoặc câu thoại sau đây sang {target_lang}.
-
-YÊU CẦU BẮT BUỘC:
-1. Dịch chính xác, tự nhiên, thuần Việt. Nếu là từ vựng đơn lẻ, hãy dịch ngắn gọn đúng nghĩa của từ đó.
-2. Giữ nguyên ý nghĩa, không tự ý thêm bớt hoặc rút gọn nội dung.
-3. BẮT BUỘC dịch đầy đủ TẤT CẢ {total_items} mục trong danh sách (từ id 0 đến id {total_items - 1}).
-4. Kết quả BẮT BUỘC trả về đúng định dạng JSON object chứa danh sách 'translations'.
-5. Nếu không thể dịch được một mục, hãy bỏ qua id đó.
-6. BẮT BUỘC không được chèn tiếng anh hoặc tiếng trung vào trong câu dịch.
-Danh sách các mục cần dịch:
-{json.dumps(temp_items, ensure_ascii=False)}
-
-ĐỊNH DẠNG ĐẦU RA BẮT BUỘC (Chỉ trả về JSON, không kèm lời giải thích):
-{{
-  "translations": [
-    {{"id": 0, "translated_text": "nội dung dịch 0"}},
-    {{"id": 1, "translated_text": "nội dung dịch 1"}}
-  ]
-}}"""
-
-        try:
-            response = self.client.chat.completions.create(
-                model=config.GROQ_LLM_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                response_format={"type": "json_object"},
-            )
-
-            raw_content = response.choices[0].message.content
-            translated_data = json.loads(raw_content)
-
-            # Extract danh sách từ response JSON
-            translated_list = []
-            if isinstance(translated_data, dict):
-                for key in ["translations", "data", "items"]:
-                    if key in translated_data and isinstance(
-                        translated_data[key], list
-                    ):
-                        translated_list = translated_data[key]
-                        break
-                if not translated_list:
-                    for val in translated_data.values():
-                        if isinstance(val, list):
-                            translated_list = val
-                            break
-            elif isinstance(translated_data, list):
-                translated_list = translated_data
-
-            # Map ngược từ temp_id (0..N-1) về original_id
-            trans_map = {}
-            for item in translated_list:
-                if isinstance(item, dict) and "id" in item:
-                    temp_id = item["id"]
-                    if temp_id in index_to_original_id:
-                        original_id = index_to_original_id[temp_id]
-                        trans_text = item.get("translated_text", "").strip()
-                        trans_map[original_id] = trans_text
-
-            return trans_map
-
-        except Exception as e:
-            print(f"⚠️ Lỗi khi dịch batch: {e}")
-            return {}
-
-    def translate_segments(
-        self,
-        json_path: Path,
-        target_lang: str = "Vietnamese",
-        batch_size: int = 30,
-        verbose: bool = True,
-    ) -> list:
-        """Đọc info.json, tự động làm sạch/tách segment nếu bị dính chùm, dịch từng segment và cập nhật lại file JSON."""
+    def translate_segments(self, json_path: Path, verbose: bool = True) -> List[Dict[str, Any]]:
         json_path = Path(json_path)
         if not json_path.exists():
-            raise FileNotFoundError(
-                f"❌ Không tìm thấy file JSON tại: {json_path}"
-            )
+            raise FileNotFoundError(f"❌ Không tìm thấy file JSON tại: {json_path}")
 
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        segments = data.get("segments", [])
-        if not segments:
-            if verbose:
-                print("⚠️ Không tìm thấy 'segments' trong info.json!")
+        raw_segments = data.get("segments", [])
+        if not raw_segments:
             return []
 
-        # TỰ ĐỘNG XỬ LÝ: Kiểm tra nếu Whisper gom toàn bộ chuỗi từ vựng vào 1 segment
-        segments = self._split_long_or_list_segment(segments)
-
+        # 1. TIỀN XỬ LÝ: Gộp các câu quá nhanh lại với nhau
+        original_count = len(raw_segments)
+        segments = self._merge_fast_segments(raw_segments)
+        
         if verbose:
-            print(
-                f"🌐 [Translator] Bắt đầu dịch {len(segments)} segments sang {target_lang} (Chia làm các batch {batch_size} câu)..."
-            )
+            print(f"🧩 [Translator] Đã gộp các câu nói nhanh: từ {original_count} câu -> {len(segments)} cụm câu liền mạch.")
 
-        # Chia segments thành từng batch nhỏ hơn để xử lý an toàn
-        full_trans_map = {}
-        total_batches = (len(segments) + batch_size - 1) // batch_size
+        # 2. Chuẩn bị danh sách gửi LLM dịch
+        items_to_translate = [
+            {
+                "id": seg["id"], 
+                "text": seg.get("text", ""),
+                "duration": round(seg.get("end", 0.0) - seg.get("start", 0.0), 2)
+            } 
+            for seg in segments
+        ]
 
-        for i in range(0, len(segments), batch_size):
-            batch = segments[i : i + batch_size]
-            current_batch_num = (i // batch_size) + 1
+        total_items = len(items_to_translate)
 
-            if verbose:
-                print(
-                    f" 🔄 Đang dịch batch {current_batch_num}/{total_batches} ({len(batch)} câu)..."
-                )
+        # 3. PROMPT ĐIỀU CHỈNH: Cho phép LLM chủ động tổng hợp ý thành 1 câu mượt
+        prompt = f"""Bạn là một biên dịch viên và biên kịch lồng tiếng phim chuyên nghiệp. 
+Hãy dịch danh sách các cụm thoại sau đây sang Tiếng Việt.
 
-            batch_map = self._translate_batch(batch, target_lang)
-            full_trans_map.update(batch_map)
+MỤC TIÊU CỐT LÕI:
+Dịch cô đọng, văn phong thuần Việt, tự nhiên. Một số mục đầu vào đã được gộp từ nhiều câu nói nhanh, hãy tổng hợp ý để dịch thành 1 CÂU TIẾNG VIỆT HOÀN CHỈNH, MƯỢT MÀ, không dịch ngắt ngụm.
 
-        # Áp dụng bản dịch vào từng segment
-        full_translated_text = []
+QUY TẮC BẮT BUỘC:
+1. DỊCH CÔ ĐỌNG: Tiếng Việt thường dài hơn. Hãy lược bỏ từ đệm thừa (thì, là, mà, rằng, đó) để tốc độ đọc AI tự nhiên.
+2. BẮT BUỘC dịch đủ {total_items} mục (từ id 0 đến id {total_items - 1}).
+3. KHÔNG giữ lại chữ tiếng Anh, tiếng Trung trong câu dịch.
+
+TỰ ĐỘNG CHÈN NHÃN BIỂU CẢM (Vieneu Tags):
+Dựa vào ngữ cảnh, chủ động chèn các nhãn `[...]` thích hợp vào `translated_text`:
+- [cười], [thở dài], [hắng giọng], [ngập ngừng]
+*(Chỉ chèn khi thực sự rõ cảm xúc).*
+
+Danh sách cần dịch:
+{json.dumps(items_to_translate, ensure_ascii=False)}
+
+ĐỊNH DẠNG ĐẦU RA (Chỉ trả về JSON hợp lệ):
+{{
+  "translations": [
+    {{"id": 0, "translated_text": "Câu dịch gộp mượt mà có thể chèn [hắng giọng]..."}},
+    {{"id": 1, "translated_text": "Câu dịch tiếp theo..."}}
+  ]
+}}"""
+
+        # 4. Gọi API Llama 3.3 / Groq để dịch
+        translated_map = self._call_llm_api(prompt)
+
+        # 5. Cập nhật câu dịch vào danh sách segment đã gộp
         for seg in segments:
-            seg_id = seg.get("id")
-            translated_str = full_trans_map.get(seg_id, "").strip()
+            seg_id = seg["id"]
+            seg["translated_text"] = translated_map.get(seg_id, seg.get("text", ""))
 
-            # Fallback nếu Llama không dịch được
-            if not translated_str:
-                translated_str = seg.get("text", "").strip()
-
-            seg["translated_text"] = translated_str
-            full_translated_text.append(translated_str)
-
-        # Cập nhật tổng thể vào info.json
+        # 6. Ghi đè lại cấu trúc segments mới vào info.json
         data["segments"] = segments
-        data["translated_text"] = " ".join(full_translated_text)
         data["status"] = "translated"
 
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
 
         if verbose:
-            print(f"✅ Đã dịch thành công {len(segments)} câu/từ vựng!")
-            print(f"📝 Đã cập nhật bản dịch vào: {json_path.name}\n")
+            print(f"✅ [Translator] Đã dịch xong toàn bộ {len(segments)} cụm câu thoại!")
 
         return segments
 
+    def _call_llm_api(self, prompt: str) -> Dict[int, str]:
+        """Hàm phụ trách gửi request tới API LLM và parse kết quả JSON."""
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "llama-3.3-70b-versatile",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "response_format": {"type": "json_object"}
+        }
 
-if __name__ == "__main__":
-    temp_dir = getattr(config, "TEMP_DIR", Path("output/temp"))
+        try:
+            res = requests.post(url, headers=headers, json=payload, timeout=60)
+            res.raise_for_status()
+            res_data = res.json()
+            content = res_data["choices"][0]["message"]["content"]
+            
+            parsed = json.loads(content)
+            translations = parsed.get("translations", [])
+            
+            # Chuyển về dạng dict {id: translated_text}
+            return {item["id"]: item["translated_text"] for item in translations}
 
-    if temp_dir.exists():
-        subdirs = sorted(
-            [d for d in temp_dir.iterdir() if d.is_dir()],
-            key=lambda x: x.stat().st_mtime,
-            reverse=True,
-        )
-
-        if subdirs:
-            target_folder = subdirs[0]
-            target_json = target_folder / "info.json"
-
-            if target_json.exists():
-                print(
-                    f"🔍 Đang chạy test Translator trên folder: {target_folder.name}\n"
-                )
-
-                translator = SegmentTranslator()
-                translated_segments = translator.translate_segments(
-                    json_path=target_json, verbose=True
-                )
-
-                print("--- KẾT QUẢ DỊCH THỬ NGHỆM (5 câu đầu) ---")
-                for seg in translated_segments[:5]:
-                    print(f"[{seg['start']}s -> {seg['end']}s]")
-                    print(f" 🔴 Gốc : {seg['text']}")
-                    print(f" 🟢 Dịch: {seg['translated_text']}")
-                    print("-" * 40)
-            else:
-                print(
-                    f"❌ Không tìm thấy file 'info.json' trong folder: {target_folder}"
-                )
-        else:
-            print(
-                f"⚠️ Thư mục '{temp_dir}' đang trống, hãy chạy downloader & transcriber trước."
-            )
-    else:
-        print(f"❌ Thư mục TEMP_DIR không tồn tại: {temp_dir}")
+        except Exception as e:
+            print(f"❌ Lỗi khi gọi LLM API Translator: {e}")
+            return {}

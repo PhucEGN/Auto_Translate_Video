@@ -291,6 +291,6 @@ class VideoDownloader:
 
 
 if __name__ == "__main__":
-    link_douyin = "🔗 Link Video: https://v.douyin.com/vwz_mEohrm0/ 复制此链接，打开Dou音搜索，直接观看视频！"
+    link_douyin = "https://youtube.com/shorts/Q-sZRMZ0qyg?si=OToNnOVULfAewwLx"
     downloader = VideoDownloader()
     downloader.download_video(link_douyin, verbose=True)

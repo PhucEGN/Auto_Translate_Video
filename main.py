@@ -2,6 +2,7 @@ import sys
 import shutil
 import argparse
 from pathlib import Path
+from vieneu import Vieneu
 
 # Import các thông số cấu hình từ config.py
 import config
@@ -14,7 +15,7 @@ from modules.tts_generator import SegmentTTSGenerator
 from modules.audio_video_merger import AudioVideoMerger
 
 
-def process_video_pipeline(video_url: str):
+def process_video_pipeline(video_url: str, vieneu_instance: Vieneu = None):
     """Luồng xử lý tự động chuyển đổi video từ Link sang Video Tiếng Việt lồng tiếng hoàn chỉnh."""
     print("=" * 70)
     print("🚀 BẮT ĐẦU TIẾN TRÌNH TỰ ĐỘNG TẠO VIDEO LỒNG TIẾNG TIẾNG VIỆT")
@@ -57,11 +58,17 @@ def process_video_pipeline(video_url: str):
         translator.translate_segments(json_path, verbose=True)
 
         # -----------------------------------------------------------------
-        # BƯỚC 4: Tạo giọng đọc AI tiếng Việt theo từng segment bằng Edge-TTS
+        # BƯỚC 4: Tạo giọng đọc AI tiếng Việt mượt mà bằng Vieneu (GPU)
         # -----------------------------------------------------------------
-        print("📌 [4/5] Tạo file âm thanh lồng tiếng AI (Edge-TTS)...")
-        tts_voice = getattr(config, "DEFAULT_VOICE", "vi-VN-HoaiMyNeural")
-        tts = SegmentTTSGenerator(voice=tts_voice)
+        print("📌 [4/5] Tạo file âm thanh lồng tiếng AI (Vieneu TTS)...")
+        tts_voice = getattr(config, "DEFAULT_VOICE", "Minh Đức")
+        tts_style = getattr(config, "DEFAULT_STYLE", "tu_nhien")
+
+        tts = SegmentTTSGenerator(
+            voice=tts_voice, 
+            style=tts_style,
+            vieneu_instance=vieneu_instance
+        )
         tts.generate_speech_for_segments(json_path, verbose=True)
 
         # -----------------------------------------------------------------
@@ -118,7 +125,7 @@ def main():
     # Nếu không truyền qua tham số dòng lệnh --url, yêu cầu nhập từ phím
     if not video_url:
         print("=" * 70)
-        print("🎥 HỆ THỐNG TỰ ĐỘNG DỊCH VÀ LỒNG TIẾNG VIDEO")
+        print("🎥 HỆ THỐNG TỰ ĐỘNG DỊCH VÀ LỒNG TIẾNG VIDEO (VIENEU TTS)")
         print("=" * 70)
         video_url = input("👉 Nhập link video cần xử lý: ").strip()
 
@@ -126,7 +133,11 @@ def main():
         print("❌ Link video không được để trống!")
         sys.exit(1)
 
-    process_video_pipeline(video_url)
+    # Khởi tạo Vieneu 1 lần duy nhất trên GPU
+    print("\n⚙️ Đang khởi tạo mô hình Vieneu TTS...")
+    vieneu_instance = Vieneu()
+
+    process_video_pipeline(video_url, vieneu_instance=vieneu_instance)
 
 
 if __name__ == "__main__":

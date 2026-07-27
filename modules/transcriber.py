@@ -152,7 +152,7 @@ class AudioTranscriber:
 
 
 if __name__ == "__main__":
-    sample_dir = config.TEMP_DIR / "26-07-2026_12-56-50"
+    sample_dir = config.TEMP_DIR / "27-07-2026_13-22-03"
     sample_audio = sample_dir / "file.mp3"
     sample_json = sample_dir / "info.json"
 
