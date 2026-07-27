@@ -86,7 +86,8 @@ YÊU CẦU BẮT BUỘC:
 2. Giữ nguyên ý nghĩa, không tự ý thêm bớt hoặc rút gọn nội dung.
 3. BẮT BUỘC dịch đầy đủ TẤT CẢ {total_items} mục trong danh sách (từ id 0 đến id {total_items - 1}).
 4. Kết quả BẮT BUỘC trả về đúng định dạng JSON object chứa danh sách 'translations'.
-
+5. Nếu không thể dịch được một mục, hãy bỏ qua id đó.
+6. BẮT BUỘC không được chèn tiếng anh hoặc tiếng trung vào trong câu dịch.
 Danh sách các mục cần dịch:
 {json.dumps(temp_items, ensure_ascii=False)}
 
@@ -100,7 +101,7 @@ Danh sách các mục cần dịch:
 
         try:
             response = self.client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=config.GROQ_LLM_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
                 response_format={"type": "json_object"},
