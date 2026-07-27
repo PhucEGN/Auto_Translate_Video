@@ -73,7 +73,7 @@ class SegmentTTSGenerator:
         voice: Optional[str] = None, 
         style: str = "tu_nhien", 
         sample_rate: int = 48000,
-        max_words_per_sec: float = 4.5,
+        max_words_per_sec: float = 4.0,
         pad_tail_ms: int = 150,
         enable_clone: bool = False,
         ref_audio_path: Optional[Path] = None,

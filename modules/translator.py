@@ -90,33 +90,35 @@ class SegmentTranslator:
         total_items = len(items_to_translate)
 
         # 3. PROMPT ĐIỀU CHỈNH: Cho phép LLM chủ động tổng hợp ý thành 1 câu mượt
-        prompt = f"""Bạn là một biên dịch viên và biên kịch lồng tiếng phim chuyên nghiệp. 
-Hãy dịch danh sách các cụm thoại sau đây sang Tiếng Việt.
+        prompt = f"""You are a professional film dubbing translator and scriptwriter.
+Translate the following list of dialogue entries from the source language into Vietnamese.
 
-MỤC TIÊU CỐT LÕI:
-Dịch cô đọng, văn phong thuần Việt, tự nhiên. Một số mục đầu vào đã được gộp từ nhiều câu nói nhanh, hãy tổng hợp ý để dịch thành 1 CÂU TIẾNG VIỆT HOÀN CHỈNH, MƯỢT MÀ, không dịch ngắt ngụm.
+CORE OBJECTIVE:
+Translate into concise, highly natural, and idiomatic Vietnamese suitable for voiceover. Some input items contain merged fast-spoken phrases—synthesize their core meaning into SINGLE, COMPLETE, AND SMOOTH VIETNAMESE SENTENCES without awkward pauses or literal line-by-line fragments.
 
-QUY TẮC BẮT BUỘC:
-1. DỊCH CÔ ĐỌNG: Tiếng Việt thường dài hơn. Hãy lược bỏ từ đệm thừa (thì, là, mà, rằng, đó) để tốc độ đọc AI tự nhiên.
-2. BẮT BUỘC dịch đủ {total_items} mục (từ id 0 đến id {total_items - 1}).
-3. KHÔNG giữ lại chữ tiếng Anh, tiếng Trung trong câu dịch.
-4. KHÔNG thêm bất kỳ chú thích nào ngoài câu dịch.
-5. Nếu là tên người hãy đặt 1 tên Việt Nam tương đương, nếu không có hãy tạo ra một tên đó theo tiếng việt nhưng phải sát nghĩa với tên gốc. CHÚ Ý HÃY GIỮ NGHUYÊN TÊN đó trong suốt quá trình dịch (không được đổi tên của một đối tượng nhiều lần)
-6. Dùng từ ngữ gần gủi với đời sống, tránh dùng từ ngữ hàn lâm, học thuật.
+MANDATORY RULES:
+1. STRICT CONCISENESS & TIMING: Vietnamese phrases tend to be longer. Eliminate unnecessary filler words (e.g., "thì", "là", "mà", "rằng", "đó") so the generated AI voice reads at a natural, non-rushed pace.
+2. EXACT COUNT REQUIREMENT: You MUST translate ALL {total_items} items (from id 0 to id {total_items - 1}).
+3. NO FOREIGN CHARACTERS: Absolutely NO original Chinese or English characters allowed in the translation.
+4. NO EXPLANATIONS: Do NOT add any notes, side comments, or extra text outside the translated sentences.
+5. PROPER NAMES & SPECIES: 
+   - For human names: Replace with an equivalent Vietnamese name or a Vietnamese-transliterated name that stays close to the original sound/meaning. MAINTAIN 100% NAME CONSISTENCY across all entries (never change the same character's name halfway).
+   - For species, insects, or specialized terms: Translate accurately into common/standard Vietnamese terms.
+6. NATURAL SPOKEN REGISTER: Use everyday, accessible spoken language. Avoid overly academic, stiff, or formal vocabulary.
 
-TỰ ĐỘNG CHÈN NHÃN BIỂU CẢM (Vieneu Tags):
-Dựa vào ngữ cảnh, chủ động chèn các nhãn `[...]` thích hợp vào `translated_text`:
-- [cười], [thở dài], [hắng giọng], [ngập ngừng]
-*(Chỉ chèn khi thực sự rõ cảm xúc).*
+AUTOMATIC EMOTION TAGS (Vieneu Tags):
+Based on context, naturally embed emotional cues `[...]` directly into `translated_text` where appropriate:
+- Supported tags: [cười], [thở dài], [hắng giọng], [ngập ngừng]
+*(Only insert tags when the emotion is clearly evident from the context).*
 
-Danh sách cần dịch:
+INPUT DIALOGUE LIST:
 {json.dumps(items_to_translate, ensure_ascii=False)}
 
-ĐỊNH DẠNG ĐẦU RA (Chỉ trả về JSON hợp lệ):
+OUTPUT FORMAT (Return STRICTLY a valid JSON object):
 {{
   "translations": [
-    {{"id": 0, "translated_text": "Câu dịch gộp mượt mà có thể chèn [hắng giọng]..."}},
-    {{"id": 1, "translated_text": "Câu dịch tiếp theo..."}}
+    {{"id": 0, "translated_text": "Smooth merged translation with optional [hắng giọng] tag..."}},
+    {{"id": 1, "translated_text": "Next translated sentence..."}}
   ]
 }}"""
 
