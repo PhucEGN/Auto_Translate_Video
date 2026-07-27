@@ -74,7 +74,7 @@ class AudioVideoMerger:
             if actual_duration > target_duration:
                 speed_factor = actual_duration / target_duration
                 # Khống chế mức nén tối đa 1.4x để tránh bị quá nhanh/méo tiếng
-                speed_factor = min(speed_factor, 1.6)
+                speed_factor = min(speed_factor, 1.4)
 
                 adjusted_filepath = adjusted_dir / f"adj_seg_{seg_id:03d}.mp3"
                 self._adjust_audio_speed(audio_abs_path, adjusted_filepath, speed_factor)

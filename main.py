@@ -15,10 +15,11 @@ from modules.tts_generator import SegmentTTSGenerator
 from modules.audio_video_merger import AudioVideoMerger
 
 
-def process_video_pipeline(video_url: str, vieneu_instance: Vieneu = None):
+def process_video_pipeline(video_url: str, enable_clone: bool = False, vieneu_instance: Vieneu = None):
     """Luồng xử lý tự động chuyển đổi video từ Link sang Video Tiếng Việt lồng tiếng hoàn chỉnh."""
     print("=" * 70)
     print("🚀 BẮT ĐẦU TIẾN TRÌNH TỰ ĐỘNG TẠO VIDEO LỒNG TIẾNG TIẾNG VIỆT")
+    print(f"🎭 Chế độ Nhái Giọng (Voice Clone): {'BẬT' if enable_clone else 'TẮT'}")
     print("=" * 70)
     print(f"🔗 Link Video: {video_url}\n")
 
@@ -64,9 +65,19 @@ def process_video_pipeline(video_url: str, vieneu_instance: Vieneu = None):
         tts_voice = getattr(config, "DEFAULT_VOICE", "Minh Đức")
         tts_style = getattr(config, "DEFAULT_STYLE", "tu_nhien")
 
+        ref_audio_path = None
+        if enable_clone:
+            ref_filename = getattr(config, "REF_AUDIO_FILENAME", "ref.wav")
+            ref_duration = getattr(config, "REF_AUDIO_DURATION", 10.0)
+            ref_audio_path = temp_folder / ref_filename
+            print(f"🎙️ Đang trích xuất {ref_duration}s âm thanh gốc làm mẫu nhái giọng...")
+            downloader.extract_reference_audio(audio_file_path, ref_audio_path, duration=ref_duration)
+
         tts = SegmentTTSGenerator(
             voice=tts_voice, 
             style=tts_style,
+            enable_clone=enable_clone,
+            ref_audio_path=ref_audio_path,
             vieneu_instance=vieneu_instance
         )
         tts.generate_speech_for_segments(json_path, verbose=True)
@@ -86,14 +97,11 @@ def process_video_pipeline(video_url: str, vieneu_instance: Vieneu = None):
         output_base_dir = getattr(config, "OUTPUT_DIR", Path("output"))
         output_base_dir.mkdir(parents=True, exist_ok=True)
 
-        # Đặt tên thư mục kết quả trong output theo tên folder tạm
         final_output_folder = output_base_dir / temp_folder.name
 
-        # Nếu thư mục đích đã tồn tại trong output thì xóa trước để đè mới
         if final_output_folder.exists():
             shutil.rmtree(final_output_folder)
 
-        # Chuyển toàn bộ thư mục kết quả từ temp/ sang output/
         shutil.move(str(temp_folder), str(final_output_folder))
 
         print("\n" + "=" * 70)
@@ -104,7 +112,6 @@ def process_video_pipeline(video_url: str, vieneu_instance: Vieneu = None):
 
     except Exception as e:
         print(f"\n❌ ĐÃ XẢY RA LỖI TRONG QUÁ TRÌNH XỬ LÝ: {e}")
-        # Dọn dẹp thư mục tạm nếu có lỗi phát sinh
         if temp_folder and temp_folder.exists():
             print(f"🗑️ Đang dọn dẹp thư mục tạm bị lỗi: {temp_folder}")
             shutil.rmtree(temp_folder, ignore_errors=True)
@@ -118,11 +125,17 @@ def main():
         type=str, 
         help="Đường dẫn URL của video (YouTube, Facebook, TikTok, ...)"
     )
+    parser.add_argument(
+        "--clone", "-c",
+        type=int,
+        choices=[0, 1],
+        help="Bật nhái giọng nhân vật (1: Bật, 0: Tắt)"
+    )
     args = parser.parse_args()
 
     video_url = args.url
+    clone_choice = args.clone
     
-    # Nếu không truyền qua tham số dòng lệnh --url, yêu cầu nhập từ phím
     if not video_url:
         print("=" * 70)
         print("🎥 HỆ THỐNG TỰ ĐỘNG DỊCH VÀ LỒNG TIẾNG VIDEO (VIENEU TTS)")
@@ -133,11 +146,18 @@ def main():
         print("❌ Link video không được để trống!")
         sys.exit(1)
 
-    # Khởi tạo Vieneu 1 lần duy nhất trên GPU
-    print("\n⚙️ Đang khởi tạo mô hình Vieneu TTS...")
-    vieneu_instance = Vieneu()
+    state = "pytorch"
+    if clone_choice is None:
+        user_input = input("👉 Nhập lựa chọn nhái giọng (1: Bật, 0: Tắt) [Mặc định 0]: ").strip()
+        enable_clone = True if user_input == "1" else False
+    else:
+        state = "onnx"
+        enable_clone = (clone_choice == 1)
 
-    process_video_pipeline(video_url, vieneu_instance=vieneu_instance)
+    print(f"\n⚙️ Đang khởi tạo mô hình Vieneu TTS ({state.upper()})...")
+    vieneu_instance = Vieneu(backend=state)
+
+    process_video_pipeline(video_url, enable_clone=enable_clone, vieneu_instance=vieneu_instance)
 
 
 if __name__ == "__main__":

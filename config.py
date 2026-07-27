@@ -18,6 +18,12 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 # Lấy API Key và Models
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-TTS_VOICE = "vi-VN-HoaiMyNeural"  # Giọng đọc tiếng Việt mượt mà
-GROQ_LLM_MODEL = "llama-3.1-8b-instant"
+DEFAULT_VOICE = "Minh Đức"
+DEFAULT_STYLE = "tu_nhien"
+GROQ_LLM_MODEL = "llama-3.3-70b-versatile"
 GROQ_STT_MODEL = "whisper-large-v3"
+
+# --- CẤU HÌNH CLONE GIỌNG (VOICE CLONING) ---
+ENABLE_VOICE_CLONE = False       # Trạng thái mặc định
+REF_AUDIO_FILENAME = "ref.wav"    # Tên file audio mẫu dùng để nhái giọng
+REF_AUDIO_DURATION = 10.0         # Độ dài tối đa của file audio mẫu (giây)

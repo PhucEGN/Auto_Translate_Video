@@ -100,6 +100,9 @@ QUY TẮC BẮT BUỘC:
 1. DỊCH CÔ ĐỌNG: Tiếng Việt thường dài hơn. Hãy lược bỏ từ đệm thừa (thì, là, mà, rằng, đó) để tốc độ đọc AI tự nhiên.
 2. BẮT BUỘC dịch đủ {total_items} mục (từ id 0 đến id {total_items - 1}).
 3. KHÔNG giữ lại chữ tiếng Anh, tiếng Trung trong câu dịch.
+4. KHÔNG thêm bất kỳ chú thích nào ngoài câu dịch.
+5. Nếu là tên người hãy đặt 1 tên Việt Nam tương đương, nếu không có hãy tạo ra một tên đó theo tiếng việt nhưng phải sát nghĩa với tên gốc. CHÚ Ý HÃY GIỮ NGHUYÊN TÊN đó trong suốt quá trình dịch (không được đổi tên của một đối tượng nhiều lần)
+6. Dùng từ ngữ gần gủi với đời sống, tránh dùng từ ngữ hàn lâm, học thuật.
 
 TỰ ĐỘNG CHÈN NHÃN BIỂU CẢM (Vieneu Tags):
 Dựa vào ngữ cảnh, chủ động chèn các nhãn `[...]` thích hợp vào `translated_text`:

@@ -38,21 +38,18 @@ class VideoDownloader:
 
     def _resolve_douyin_url(self, raw_input: str) -> str:
         """Trích xuất URL từ chuỗi chia sẻ Douyin và theo dõi redirect đến link gốc."""
-        # 1. Trích xuất URL từ đoạn văn bản chia sẻ
         url_match = re.search(r'https?://[^\s]+', raw_input)
         if not url_match:
             return raw_input
         
         extracted_url = url_match.group(0)
 
-        # 2. Xử lý link rút gọn v.douyin.com
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         }
         try:
             res = requests.get(extracted_url, headers=headers, allow_redirects=True, timeout=10)
             final_url = res.url
-            # Xóa các tham số tracking không cần thiết trên URL Douyin
             parsed = urllib.parse.urlparse(final_url)
             clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
             return clean_url
@@ -85,7 +82,7 @@ class VideoDownloader:
         while not stop_event.is_set():
             current_bytes = 0
             for file in folder_path.iterdir():
-                if file.is_file() and not file.name.endswith(('.json', '.mp3', '.aria2')):
+                if file.is_file() and not file.name.endswith(('.json', '.mp3', '.aria2', '.wav')):
                     try:
                         current_bytes += file.stat().st_size
                     except FileNotFoundError:
@@ -109,7 +106,6 @@ class VideoDownloader:
 
     def _get_cookie_file(self) -> str | None:
         """Kiểm tra và trả về đường dẫn file cookies.txt nếu có."""
-        # Kiểm tra file cookies.txt trong thư mục gốc của dự án hoặc thư mục temp
         project_root = Path(__file__).resolve().parent.parent
         possible_paths = [
             project_root / "cookies.txt",
@@ -121,20 +117,32 @@ class VideoDownloader:
             if p.exists() and p.stat().st_size > 0:
                 return str(p)
 
-        # Nếu chưa có, tự động tạo 1 file cookie giả định cơ bản cho Douyin
         default_cookie = self.temp_dir / "douyin_cookies.txt"
         with open(default_cookie, "w", encoding="utf-8") as f:
             f.write("# Netscape HTTP Cookie File\n")
             f.write(".douyin.com\tTRUE\t/\tFALSE\t0\tpassport_csrf_token\tdummy_token\n")
         return str(default_cookie)
 
+    def extract_reference_audio(self, input_audio: Path, output_ref_path: Path, duration: float = 10.0) -> Path:
+        """Cắt một đoạn audio ngắn (mặc định 10s) ở đầu file làm mẫu clone giọng."""
+        cmd = [
+            'ffmpeg', '-y',
+            '-ss', '00:00:01',  # Bỏ 1s đầu tránh giật
+            '-i', str(input_audio),
+            '-t', str(duration),
+            '-c:a', 'pcm_s16le',
+            '-ar', '24000',      # Sample rate phù hợp cho TTS clone
+            '-ac', '1',
+            str(output_ref_path)
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        return output_ref_path
+
     def download_video(self, raw_url: str, verbose: bool = True):
         """Tải video Douyin/YouTube và xuất ra thư mục DD-MM-YYYY_HH-MM-SS."""
         
-        # Xử lý URL nếu là link Douyin
         video_url = self._resolve_douyin_url(raw_url)
 
-        # Cấu hình Headers chuẩn trình duyệt
         common_headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
             'Referer': 'https://www.douyin.com/',
@@ -152,7 +160,6 @@ class VideoDownloader:
         if cookie_file:
             quiet_opts['cookiefile'] = cookie_file
 
-        # 1. Trích xuất thông tin video
         filesize_estimate = 0
         try:
             if verbose:
@@ -173,7 +180,6 @@ class VideoDownloader:
             duration = 0
             uploader = "Unknown"
 
-        # 2. Tạo thư mục chứa dữ liệu
         created_at = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
         folder_path = self.temp_dir / created_at
         folder_path.mkdir(parents=True, exist_ok=True)
@@ -182,7 +188,6 @@ class VideoDownloader:
         audio_path = folder_path / "file.mp3"
         json_path = folder_path / "info.json"
 
-        # 3. Chuẩn bị metadata JSON
         metadata = {
             "title": video_title,
             "url": video_url,
@@ -197,7 +202,6 @@ class VideoDownloader:
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(metadata, f, ensure_ascii=False, indent=4)
 
-        # Cấu hình tải chính
         ydl_opts = {
             'outtmpl': str(folder_path / 'file.%(ext)s'),
             'format': 'best[vcodec~=h264][acodec!=none]/best[vcodec!=none][acodec!=none]/best',
@@ -208,7 +212,6 @@ class VideoDownloader:
             'logger': QuietLogger(),
             'http_headers': common_headers,
             
-            # --- CẤU HÌNH TỐI ƯU ARIA2C ---
             'external_downloader': 'aria2c',
             'external_downloader_args': [
                 '-x16', '-s16', '-k1M',
@@ -228,7 +231,6 @@ class VideoDownloader:
             if verbose:
                 print(f"🎬 Tiêu đề: {video_title}")
 
-            # Thread giám sát tiến trình
             stop_event = threading.Event()
             monitor_thread = None
             if verbose:
@@ -239,7 +241,6 @@ class VideoDownloader:
                 )
                 monitor_thread.start()
 
-            # Thực hiện tải file
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([video_url])
 
@@ -247,7 +248,6 @@ class VideoDownloader:
                 stop_event.set()
                 monitor_thread.join()
 
-            # Chuẩn hóa tên file xuất ra thành file.mp4
             downloaded_mp4 = folder_path / "file.mp4"
             if not downloaded_mp4.exists():
                 for pf in folder_path.glob("file.*"):
@@ -255,7 +255,6 @@ class VideoDownloader:
                         pf.rename(video_path)
                         break
 
-            # 4. Tách file.mp3 từ file.mp4 bằng FFmpeg
             if verbose:
                 print("🎙️ Đang tách âm thanh ra file.mp3...")
             
