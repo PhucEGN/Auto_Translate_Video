@@ -11,13 +11,19 @@ import config
 
 
 class AudioVideoMerger:
-    """Class xử lý việc căn chỉnh thời gian âm thanh dịch và gộp vào video gốc."""
+    """Class xử lý việc căn chỉnh thời gian âm thanh dịch và gộp vào video gốc (hỗ trợ nhạc nền gốc)."""
 
     def __init__(self):
         pass
 
-    def merge_audio_video(self, json_path: Path, verbose: bool = True) -> Path:
-        """Đọc info.json, xếp toàn bộ âm thanh vào đúng timeline và gộp vào video."""
+    def merge_audio_video(
+        self, 
+        json_path: Path, 
+        bg_volume: float = 0.7,      # Âm lượng nhạc nền gốc (0.7 = 70%)
+        speech_volume: float = 1.2,  # Âm lượng giọng lồng tiếng (1.2 = 120%)
+        verbose: bool = True
+    ) -> Path:
+        """Đọc info.json, xếp toàn bộ âm thanh vào đúng timeline và gộp vào video (kèm nhạc nền nếu có)."""
         json_path = Path(json_path)
         if not json_path.exists():
             raise FileNotFoundError(f"❌ Không tìm thấy file JSON tại: {json_path}")
@@ -91,16 +97,29 @@ class AudioVideoMerger:
             start_ms = int(start_time_sec * 1000)
             master_audio = master_audio.overlay(processed_seg_audio, position=start_ms)
 
-        # 3. Xuất file âm thanh tổng hợp duy nhất
+        # 3. Xuất file âm thanh giọng lồng tiếng tổng hợp
         master_audio_path = folder_path / "full_translated_audio.wav"
         master_audio.export(master_audio_path, format="wav")
 
-        # 4. Gộp file âm thanh tổng hợp vào video bằng FFmpeg
+        # 4. Kiểm tra file nhạc nền/hiệu ứng gốc (background.wav)
+        bg_audio_path = folder_path / "background.wav"
         output_video = folder_path / "final_output.mp4"
-        if verbose:
-            print("⚙️ [Merger] Đang gộp đường âm thanh hoàn chỉnh vào video...")
 
-        self._render_final_video(input_video, master_audio_path, output_video)
+        if bg_audio_path.exists():
+            if verbose:
+                print("🎼 [Merger] Phát hiện nhạc nền/hiệu ứng gốc! Đang hòa trộn nhạc nền + giọng lồng tiếng...")
+            self._render_final_video_with_bg(
+                input_video, 
+                master_audio_path, 
+                bg_audio_path, 
+                output_video,
+                bg_volume=bg_volume,
+                speech_volume=speech_volume
+            )
+        else:
+            if verbose:
+                print("⚙️ [Merger] Không tìm thấy nhạc nền, đang gộp đường âm thanh lồng tiếng vào video...")
+            self._render_final_video(input_video, master_audio_path, output_video)
 
         # Cập nhật JSON
         data["status"] = "completed"
@@ -146,6 +165,34 @@ class AudioVideoMerger:
             "-map", "1:a:0",      # Lấy luồng audio tổng từ file 1
             "-c:v", "copy",       # Giữ nguyên video stream -> Siêu nhanh
             "-c:a", "aac",        # Encode âm thanh tiếng Việt mới
+            "-b:a", "192k",
+            str(output_path)
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+    def _render_final_video_with_bg(
+        self, 
+        video_path: Path, 
+        speech_audio_path: Path, 
+        bg_audio_path: Path, 
+        output_path: Path,
+        bg_volume: float = 0.7,
+        speech_volume: float = 1.2
+    ):
+        """Trộn giọng lồng tiếng Việt với Nhạc nền/Hiệu ứng gốc rồi xuất video."""
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(video_path),          # Input 0: Video gốc
+            "-i", str(speech_audio_path),   # Input 1: Giọng lồng tiếng Việt
+            "-i", str(bg_audio_path),       # Input 2: Nhạc nền & hiệu ứng gốc
+            "-filter_complex", 
+            f"[1:a]volume={speech_volume}[a1];"
+            f"[2:a]volume={bg_volume}[a2];"
+            f"[a1][a2]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+            "-map", "0:v:0",                # Lấy luồng video từ file 0
+            "-map", "[aout]",               # Lấy luồng audio đã hòa trộn
+            "-c:v", "copy",                 # Giữ nguyên codec video
+            "-c:a", "aac",
             "-b:a", "192k",
             str(output_path)
         ]

@@ -138,6 +138,119 @@ class VideoDownloader:
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         return output_ref_path
 
+    def separate_background_audio(
+        self, 
+        audio_or_video_path: Path, 
+        output_dir: Path, 
+        bg_volume: float = 0.3, 
+        verbose: bool = True
+    ) -> Path:
+        """
+        Sử dụng Demucs để tách 4 stem (drums, bass, other, vocals), 
+        sau đó gộp (drums + bass + other) thành background.wav với bộ lọc cân bằng dải động
+        và điều chỉnh âm lượng nền theo tỷ lệ phần trăm.
+        
+        :param bg_volume: Tỷ lệ âm lượng nhạc nền (ví dụ: 0.5 tương đương 50%, 1.0 là 100%).
+        """
+        audio_or_video_path = Path(audio_or_video_path)
+        output_dir = Path(output_dir)
+
+        # Ưu tiên sử dụng file.mp3 trong cùng thư mục nếu có
+        mp3_candidate = output_dir / "file.mp3"
+        target_audio_path = mp3_candidate if mp3_candidate.exists() else audio_or_video_path
+
+        if verbose:
+            print(f"🎵 Đang phân tách dải âm thanh & hiệu ứng từ '{target_audio_path.name}' bằng Demucs...")
+
+        # 1. Gọi trực tiếp demucs.separate.main bằng Python Import
+        try:
+            from demucs.separate import main as demucs_main
+
+            old_argv = sys.argv
+            sys.argv = [
+                'demucs',
+                '-n', 'htdemucs',
+                '-o', str(output_dir),
+                str(target_audio_path)
+            ]
+
+            try:
+                demucs_main()
+                if verbose:
+                    print("✅ Demucs đã hoàn thành tiến trình phân tách!")
+            finally:
+                sys.argv = old_argv
+
+        except ImportError:
+            raise ImportError("❌ Không thể import 'demucs.separate'. Vui lòng kiểm tra lại thư viện Demucs.")
+        except Exception as e:
+            raise RuntimeError(f"❌ Lỗi trong quá trình chạy Demucs: {e}")
+
+        # 2. Định vị thư mục stem chứa các file .wav kết quả
+        htdemucs_dir = output_dir / "htdemucs"
+        stem_dir = None
+
+        if htdemucs_dir.exists():
+            subdirs_stem = [d for d in htdemucs_dir.iterdir() if d.is_dir()]
+            if subdirs_stem:
+                stem_dir = subdirs_stem[0]
+            elif list(htdemucs_dir.glob("*.wav")):
+                stem_dir = htdemucs_dir
+
+        if not stem_dir:
+            stem_dir_alt = output_dir / "stem"
+            if stem_dir_alt.exists():
+                stem_dir = stem_dir_alt
+
+        if not stem_dir or not stem_dir.exists():
+            raise FileNotFoundError(f"❌ Không tìm thấy thư mục chứa các file stem tại: {output_dir}")
+
+        # 3. Lấy danh sách các dải âm thanh hiệu ứng (bỏ qua Vocals)
+        drums_file = stem_dir / "drums.wav"
+        bass_file = stem_dir / "bass.wav"
+        other_file = stem_dir / "other.wav"
+
+        available_inputs = []
+        for f in [drums_file, bass_file, other_file]:
+            if f.exists():
+                available_inputs.extend(["-i", str(f)])
+
+        if not available_inputs:
+            raise FileNotFoundError(f"❌ Không tìm thấy dải hiệu ứng nào (drums, bass, other) trong {stem_dir}")
+
+        # 4. Trộn bằng FFmpeg, áp dụng dynaudnorm để cân bằng tiếng động nhỏ/nhạc to và áp dụng bg_volume
+        final_bg_path = output_dir / "background.wav"
+        num_inputs = len(available_inputs) // 2
+
+        # Filter explanation:
+        # amix: Trộn các stem lại với nhau
+        # dynaudnorm=f=150:g=15: Cân bằng động (Dynamic Audio Normalization) giúp kéo tiếng nhỏ lên và ghìm nhạc to xuống
+        # volume={bg_volume}: Nhân tỷ lệ âm lượng tổng của nền (ví dụ 0.5)
+        filter_str = f"amix=inputs={num_inputs}:duration=longest:dropout_transition=0,dynaudnorm=f=150:g=15,volume={bg_volume}"
+
+        mix_cmd = [
+            'ffmpeg', '-y',
+            *available_inputs,
+            '-filter_complex', filter_str,
+            str(final_bg_path)
+        ]
+
+        if verbose:
+            print(f"🎛️ Đang cân bằng âm thanh & điều chỉnh mức nền ({int(bg_volume * 100)}%)...")
+
+        try:
+            subprocess.run(mix_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"❌ Lỗi FFmpeg khi trộn âm thanh: {e.stderr}")
+
+        if final_bg_path.exists():
+            if verbose:
+                size_mb = final_bg_path.stat().st_size / (1024 * 1024)
+                print(f"🎉 Hoàn tất trích xuất nhạc nền/hiệu ứng: {final_bg_path.name} ({size_mb:.2f} MB)\n")
+            return final_bg_path
+        else:
+            raise FileNotFoundError(f"❌ File '{final_bg_path.name}' không được tạo thành công.")
+        
     def download_video(self, raw_url: str, verbose: bool = True):
         """Tải video Douyin/YouTube và xuất ra thư mục DD-MM-YYYY_HH-MM-SS."""
         

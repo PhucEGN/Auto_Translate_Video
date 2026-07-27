@@ -29,7 +29,7 @@ def process_video_pipeline(video_url: str, enable_clone: bool = False, vieneu_in
         # -----------------------------------------------------------------
         # BƯỚC 1: Tải Video & Khởi tạo thư mục tạm trong TEMP_DIR
         # -----------------------------------------------------------------
-        print("📌 [1/5] Tải video và trích xuất dữ liệu...")
+        print("📌 [1/6] Tải video và trích xuất dữ liệu...")
         downloader = VideoDownloader()
         success, folder_path, video_path, audio_path, json_path = downloader.download_video(video_url, verbose=True)
         if not success:
@@ -40,9 +40,24 @@ def process_video_pipeline(video_url: str, enable_clone: bool = False, vieneu_in
         print(f"   📂 Thư mục làm việc tạm: {temp_folder.name}\n")
 
         # -----------------------------------------------------------------
+        # BƯỚC 1.5: Tách Nhạc Nền / Hiệu Ứng Gốc Bằng Demucs (Meta AI)
+        # -----------------------------------------------------------------
+        print("📌 [1.5/6] Tách nhạc nền & hiệu ứng âm thanh bằng Demucs...")
+        bg_volume = getattr(config, "BG_VOLUME", 0.5)  # Giảm xuống 50% mặc định
+        try:
+            downloader.separate_background_audio(
+                audio_or_video_path=video_path, 
+                output_dir=temp_folder, 
+                bg_volume=bg_volume,
+                verbose=True
+            )
+        except Exception as bg_err:
+            print(f"⚠️ Không thể tách nhạc nền ({bg_err}). Hệ thống sẽ tiếp tục mà không có nhạc nền gốc.\n")
+
+        # -----------------------------------------------------------------
         # BƯỚC 2: Nhận diện giọng nói & Timestamp bằng Groq Whisper
         # -----------------------------------------------------------------
-        print("📌 [2/5] Nhận diện giọng nói & trích xuất mốc thời gian (Whisper)...")
+        print("📌 [2/6] Nhận diện giọng nói & trích xuất mốc thời gian (Whisper)...")
         transcriber = AudioTranscriber()
         transcriber.transcribe(
             audio_path=audio_file_path,
@@ -54,14 +69,14 @@ def process_video_pipeline(video_url: str, enable_clone: bool = False, vieneu_in
         # -----------------------------------------------------------------
         # BƯỚC 3: Dịch ngữ cảnh từng câu sang Tiếng Việt bằng Llama 3.3 70B
         # -----------------------------------------------------------------
-        print("📌 [3/5] Dịch nội dung sang tiếng Việt (Llama 3.3 70B)...")
+        print("📌 [3/6] Dịch nội dung sang tiếng Việt (Llama 3.3 70B)...")
         translator = SegmentTranslator()
         translator.translate_segments(json_path, verbose=True)
 
         # -----------------------------------------------------------------
         # BƯỚC 4: Tạo giọng đọc AI tiếng Việt mượt mà bằng Vieneu (GPU)
         # -----------------------------------------------------------------
-        print("📌 [4/5] Tạo file âm thanh lồng tiếng AI (Vieneu TTS)...")
+        print("📌 [4/6] Tạo file âm thanh lồng tiếng AI (Vieneu TTS)...")
         tts_voice = getattr(config, "DEFAULT_VOICE", "Minh Đức")
         tts_style = getattr(config, "DEFAULT_STYLE", "tu_nhien")
 
@@ -83,9 +98,9 @@ def process_video_pipeline(video_url: str, enable_clone: bool = False, vieneu_in
         tts.generate_speech_for_segments(json_path, verbose=True)
 
         # -----------------------------------------------------------------
-        # BƯỚC 5: Xếp Timeline và Ghép Video + Audio Tiếng Việt
+        # BƯỚC 5: Xếp Timeline và Ghép Video + Audio Tiếng Việt (+ Nhạc Nền)
         # -----------------------------------------------------------------
-        print("📌 [5/5] Căn chỉnh timeline và gộp video thành phẩm...")
+        print("📌 [5/6] Căn chỉnh timeline và gộp video thành phẩm...")
         merger = AudioVideoMerger()
         temp_final_video = merger.merge_audio_video(json_path, verbose=True)
 

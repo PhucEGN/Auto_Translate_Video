@@ -11,3 +11,4 @@ numpy
 transformers
 vieneu
 onnxruntime-gpu
+Demucs
