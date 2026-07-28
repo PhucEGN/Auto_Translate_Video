@@ -86,7 +86,6 @@ class SegmentTTSGenerator:
         self.pad_tail_ms = pad_tail_ms
         self.enable_clone = enable_clone
         self.ref_audio_path = Path(ref_audio_path) if ref_audio_path else None
-        self.vieneu = vieneu_instance if vieneu_instance is not None else Vieneu()
 
         # Sử dụng ONNX backend làm mặc định nếu không truyền vieneu_instance
         self.vieneu = vieneu_instance if vieneu_instance is not None else Vieneu(backend="onnx")
@@ -177,11 +176,32 @@ class SegmentTTSGenerator:
                 pad_tail_ms=self.pad_tail_ms
             )
 
+            # =========================================================================
+            # BỔ SUNG: Căn sát đuôi (Right-align) cho Segment 0 (Xử lý khoảng lặng đầu)
+            # =========================================================================
+            if seg_id == 0:
+                seg_start = float(seg.get("start", 0.0))
+                seg_end = float(seg.get("end", 0.0))
+                slot_duration_ms = int((seg_end - seg_start) * 1000)
+                
+                tts_duration_ms = len(smooth_audio)
+
+                # Nếu thời lượng khung Segment 0 dài hơn file âm thanh TTS sinh ra
+                if slot_duration_ms > tts_duration_ms:
+                    lead_silence_ms = slot_duration_ms - tts_duration_ms
+                    if verbose:
+                        print(f"🎯 [Seg 0] Phát hiện khoảng lặng đầu! Chèn {lead_silence_ms / 1000:.2f}s silence vào trước giọng đọc.")
+                    
+                    # Tạo khoảng lặng bằng pydub và nối vào ĐẦU của smooth_audio
+                    lead_silence = AudioSegment.silent(duration=lead_silence_ms, frame_rate=self.sample_rate)
+                    smooth_audio = lead_silence + smooth_audio
+            # =========================================================================
+
             smooth_audio.export(str(output_filepath), format="mp3", bitrate="192k")
             seg["translated_audio_file"] = f"translated_audio_segments/{output_filename}"
 
             if verbose:
-                print(f"  ✨ [Seg {seg_id}] Đã xuất MP3 mượt: {output_filename}")
+                print(f"   ✨ [Seg {seg_id}] Đã xuất MP3 mượt: {output_filename}")
 
         data["segments"] = segments
         data["status"] = "tts_generated"
