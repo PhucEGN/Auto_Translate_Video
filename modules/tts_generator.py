@@ -75,6 +75,7 @@ class SegmentTTSGenerator:
         sample_rate: int = 48000,
         max_words_per_sec: float = 4.0,
         pad_tail_ms: int = 150,
+        volume_gain_db: float = 2.0,  # 👈 THÊM THAM SỐ TÙY CHỈNH ÂM LƯỢNG (dB)
         enable_clone: bool = False,
         ref_audio_path: Optional[Path] = None,
         vieneu_instance: Optional[Vieneu] = None
@@ -84,6 +85,7 @@ class SegmentTTSGenerator:
         self.sample_rate = sample_rate
         self.max_words_per_sec = max_words_per_sec
         self.pad_tail_ms = pad_tail_ms
+        self.volume_gain_db = volume_gain_db  # Lưu tham số khuếch đại âm lượng
         self.enable_clone = enable_clone
         self.ref_audio_path = Path(ref_audio_path) if ref_audio_path else None
 
@@ -177,7 +179,13 @@ class SegmentTTSGenerator:
             )
 
             # =========================================================================
-            # BỔ SUNG: Căn sát đuôi (Right-align) cho Segment 0 (Xử lý khoảng lặng đầu)
+            # BỔ SUNG 1: Tăng âm lượng voice dựa trên tham số volume_gain_db
+            # =========================================================================
+            if self.volume_gain_db != 0:
+                smooth_audio = smooth_audio + self.volume_gain_db
+
+            # =========================================================================
+            # BỔ SUNG 2: Căn sát đuôi (Right-align) cho Segment 0 (Xử lý khoảng lặng đầu)
             # =========================================================================
             if seg_id == 0:
                 seg_start = float(seg.get("start", 0.0))
@@ -201,7 +209,7 @@ class SegmentTTSGenerator:
             seg["translated_audio_file"] = f"translated_audio_segments/{output_filename}"
 
             if verbose:
-                print(f"   ✨ [Seg {seg_id}] Đã xuất MP3 mượt: {output_filename}")
+                print(f"   ✨ [Seg {seg_id}] Đã xuất MP3 mượt (Gain: +{self.volume_gain_db}dB): {output_filename}")
 
         data["segments"] = segments
         data["status"] = "tts_generated"

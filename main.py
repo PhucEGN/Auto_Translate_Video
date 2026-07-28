@@ -34,7 +34,8 @@ def process_video_pipeline(video_url: str, enable_clone: bool = False, vieneu_in
         success, folder_path, video_path, audio_path, json_path = downloader.download_video(video_url, verbose=True)
         if not success:
             print("❌ Quá trình tải video thất bại, vui lòng kiểm tra lại link hoặc kết nối mạng.")
-            sys.exit(1)
+            return False
+
         temp_folder = json_path.parent
         audio_file_path = temp_folder / "file.mp3"
         print(f"   📂 Thư mục làm việc tạm: {temp_folder.name}\n")
@@ -88,12 +89,14 @@ def process_video_pipeline(video_url: str, enable_clone: bool = False, vieneu_in
             print(f"🎙️ Đang trích xuất {ref_duration}s âm thanh gốc làm mẫu nhái giọng...")
             downloader.extract_reference_audio(audio_file_path, ref_audio_path, duration=ref_duration)
 
+        # Tái sử dụng instance vieneu_instance đã load sẵn
         tts = SegmentTTSGenerator(
             voice=tts_voice, 
             style=tts_style,
             enable_clone=enable_clone,
             ref_audio_path=ref_audio_path,
-            vieneu_instance=vieneu_instance
+            vieneu_instance=vieneu_instance,
+            volume_gain_db=4.0
         )
         tts.generate_speech_for_segments(json_path, verbose=True)
 
@@ -124,13 +127,14 @@ def process_video_pipeline(video_url: str, enable_clone: bool = False, vieneu_in
         print(f"📂 Thư mục thành phẩm: {final_output_folder.resolve()}")
         print(f"🎬 File Video cuối cùng: {final_output_folder / 'final_output.mp4'}")
         print("=" * 70 + "\n")
+        return True
 
     except Exception as e:
         print(f"\n❌ ĐÃ XẢY RA LỖI TRONG QUÁ TRÌNH XỬ LÝ: {e}")
         if temp_folder and temp_folder.exists():
             print(f"🗑️ Đang dọn dẹp thư mục tạm bị lỗi: {temp_folder}")
             shutil.rmtree(temp_folder, ignore_errors=True)
-        sys.exit(1)
+        return False
 
 
 def main():
@@ -148,31 +152,49 @@ def main():
     )
     args = parser.parse_args()
 
-    video_url = args.url
-    clone_choice = args.clone
+    # Xác định backend khởi tạo Vieneu
+    backend_type = "onnx" if args.clone is not None else "pytorch"
     
-    if not video_url:
-        print("=" * 70)
-        print("🎥 HỆ THỐNG TỰ ĐỘNG DỊCH VÀ LỒNG TIẾNG VIDEO (VIENEU TTS)")
-        print("=" * 70)
-        video_url = input("👉 Nhập link video cần xử lý: ").strip()
+    print("=" * 70)
+    print("🎥 HỆ THỐNG TỰ ĐỘNG DỊCH VÀ LỒNG TIẾNG VIDEO (VIENEU TTS)")
+    print("=" * 70)
+    print(f"⚙️ Đang khởi tạo mô hình Vieneu TTS ({backend_type.upper()}) dùng chung cho mọi tiến trình...")
+    
+    # 1. KHỞI TẠO MODEL 1 LẦN DUY NHẤT
+    vieneu_instance = Vieneu(backend=backend_type)
+    print("✅ Load Model Vieneu thành công vào VRAM/RAM!\n")
 
-    if not video_url:
-        print("❌ Link video không được để trống!")
-        sys.exit(1)
+    # Nếu truyền sẵn URL từ CLI arguments thì xử lý ngay lượt đầu
+    first_run_url = args.url
+    first_run_clone = True if args.clone == 1 else False
 
-    state = "pytorch"
-    if clone_choice is None:
-        user_input = input("👉 Nhập lựa chọn nhái giọng (1: Bật, 0: Tắt) [Mặc định 0]: ").strip()
-        enable_clone = True if user_input == "1" else False
-    else:
-        state = "onnx"
-        enable_clone = (clone_choice == 1)
+    # 2. VÒNG LẶP XỬ LÝ NHIỀU VIDEO CONTINUOUSLY
+    while True:
+        if first_run_url:
+            video_url = first_run_url
+            enable_clone = first_run_clone
+            first_run_url = None  # Reset lại sau khi dùng lần đầu
+        else:
+            print("-" * 70)
+            video_url = input("👉 Nhập link video mới (hoặc gõ 'q' / 'exit' để thoát): ").strip()
+            
+            if video_url.lower() in ['q', 'exit', 'quit']:
+                print("👋 Cảm ơn bạn đã sử dụng hệ thống! Đã thoát.")
+                break
 
-    print(f"\n⚙️ Đang khởi tạo mô hình Vieneu TTS ({state.upper()})...")
-    vieneu_instance = Vieneu(backend=state)
+            if not video_url:
+                print("⚠️ Link video không được để trống!")
+                continue
 
-    process_video_pipeline(video_url, enable_clone=enable_clone, vieneu_instance=vieneu_instance)
+            user_clone = input("👉 Bật nhái giọng Voice Clone? (1: Có, 0: Không) [Mặc định 0]: ").strip()
+            enable_clone = True if user_clone == "1" else False
+
+        # Thực thi pipeline xử lý video (dùng lại vieneu_instance)
+        process_video_pipeline(
+            video_url=video_url, 
+            enable_clone=enable_clone, 
+            vieneu_instance=vieneu_instance
+        )
 
 
 if __name__ == "__main__":
