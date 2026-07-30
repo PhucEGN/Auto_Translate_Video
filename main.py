@@ -41,7 +41,7 @@ def select_voice_interactive(voice_files: List[Path]) -> Tuple[Optional[Path], s
     print(f"  [0] Giọng mặc định hệ thống ({default_voice_name})")
 
     for idx, voice_path in enumerate(voice_files, start=1):
-        file_type = "Profile (.pt)" if voice_path.suffix.lower() == ".pt" else "Audio (.wav/.mp3)"
+        file_type = "Profile (.pt)" if voice_path.suffix.lower() == "Audio (.wav/.mp3)" else "Audio (.wav/.mp3)"
         print(f"  [{idx}] {voice_path.stem} [{file_type}]")
 
     print("=" * 50)
