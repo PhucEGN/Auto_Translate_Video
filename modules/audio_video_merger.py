@@ -11,7 +11,7 @@ import config
 
 
 class AudioVideoMerger:
-    """Class xử lý việc căn chỉnh thời gian âm thanh dịch và gộp vào video gốc (hỗ trợ nhạc nền gốc)."""
+    """Class xử lý việc căn chỉnh thời gian âm thanh dịch và gộp vào video gốc (hỗ trợ nhạc nền gốc & mirror video)."""
 
     def __init__(self):
         pass
@@ -21,9 +21,10 @@ class AudioVideoMerger:
         json_path: Path, 
         bg_volume: float = 0.7,      # Âm lượng nhạc nền gốc (0.7 = 70%)
         speech_volume: float = 1.2,  # Âm lượng giọng lồng tiếng (1.2 = 120%)
+        mirror_video: bool = True,  # Bổ sung option Lật gương (Flip ngang)
         verbose: bool = True
     ) -> Path:
-        """Đọc info.json, xếp toàn bộ âm thanh vào đúng timeline và gộp vào video (kèm nhạc nền nếu có)."""
+        """Đọc info.json, xếp toàn bộ âm thanh vào đúng timeline và gộp vào video (kèm nhạc nền/mirror nếu có)."""
         json_path = Path(json_path)
         if not json_path.exists():
             raise FileNotFoundError(f"❌ Không tìm thấy file JSON tại: {json_path}")
@@ -45,6 +46,8 @@ class AudioVideoMerger:
         video_duration = self._get_video_duration(input_video)
         if verbose:
             print(f"🎬 [Merger] Độ dài video gốc: {video_duration:.2f}s")
+            if mirror_video:
+                print("🪞 [Merger] Đã bật chế độ Lật gương (Mirror/Horizontal Flip) cho Video!")
             print(f"🔊 [Merger] Đang xử lý và xếp timeline cho {len(segments)} segments...")
 
         # Tạo thư mục tạm lưu các file audio đã được căn chỉnh tốc độ
@@ -76,7 +79,7 @@ class AudioVideoMerger:
 
             final_audio_path = audio_abs_path
 
-            # CHỈ XỬ LÝ NẾU ÂM THANH DÀI HƠN THỜI TIAN MỤC TIÊU
+            # CHỈ XỬ LÝ NẾU ÂM THANH DÀI HƠN THỜI GIAN MỤC TIÊU
             if actual_duration > target_duration:
                 speed_factor = actual_duration / target_duration
                 # Khống chế mức nén tối đa 1.4x để tránh bị quá nhanh/méo tiếng
@@ -114,12 +117,18 @@ class AudioVideoMerger:
                 bg_audio_path, 
                 output_video,
                 bg_volume=bg_volume,
-                speech_volume=speech_volume
+                speech_volume=speech_volume,
+                mirror_video=mirror_video
             )
         else:
             if verbose:
                 print("⚙️ [Merger] Không tìm thấy nhạc nền, đang gộp đường âm thanh lồng tiếng vào video...")
-            self._render_final_video(input_video, master_audio_path, output_video)
+            self._render_final_video(
+                input_video, 
+                master_audio_path, 
+                output_video, 
+                mirror_video=mirror_video
+            )
 
         # Cập nhật JSON
         data["status"] = "completed"
@@ -155,19 +164,39 @@ class AudioVideoMerger:
         ]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
-    def _render_final_video(self, video_path: Path, audio_path: Path, output_path: Path):
-        """Ghép video gốc với file WAV tổng duy nhất (thay thế hoàn toàn đường tiếng cũ)."""
+    def _render_final_video(
+        self, 
+        video_path: Path, 
+        audio_path: Path, 
+        output_path: Path, 
+        mirror_video: bool = False
+    ):
+        """Ghép video gốc với file WAV tổng (Hỗ trợ lật gương nếu mirror_video=True)."""
         cmd = [
             "ffmpeg", "-y",
             "-i", str(video_path),
-            "-i", str(audio_path),
+            "-i", str(audio_path)
+        ]
+
+        if mirror_video:
+            # Re-encode video với filter hflip (lật ngang)
+            cmd.extend([
+                "-vf", "hflip",
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "22"
+            ])
+        else:
+            # Giữ nguyên video stream -> Siêu nhanh
+            cmd.extend(["-c:v", "copy"])
+
+        cmd.extend([
             "-map", "0:v:0",      # Lấy luồng video từ file 0
             "-map", "1:a:0",      # Lấy luồng audio tổng từ file 1
-            "-c:v", "copy",       # Giữ nguyên video stream -> Siêu nhanh
             "-c:a", "aac",        # Encode âm thanh tiếng Việt mới
             "-b:a", "192k",
             str(output_path)
-        ]
+        ])
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
     def _render_final_video_with_bg(
@@ -177,25 +206,47 @@ class AudioVideoMerger:
         bg_audio_path: Path, 
         output_path: Path,
         bg_volume: float = 0.7,
-        speech_volume: float = 1.2
+        speech_volume: float = 1.2,
+        mirror_video: bool = False
     ):
-        """Trộn giọng lồng tiếng Việt với Nhạc nền/Hiệu ứng gốc rồi xuất video."""
+        """Trộn giọng lồng tiếng Việt với Nhạc nền/Hiệu ứng gốc rồi xuất video (Hỗ trợ lật gương)."""
         cmd = [
             "ffmpeg", "-y",
             "-i", str(video_path),          # Input 0: Video gốc
             "-i", str(speech_audio_path),   # Input 1: Giọng lồng tiếng Việt
-            "-i", str(bg_audio_path),       # Input 2: Nhạc nền & hiệu ứng gốc
-            "-filter_complex", 
+            "-i", str(bg_audio_path)        # Input 2: Nhạc nền & hiệu ứng gốc
+        ]
+
+        # Xử lý luồng Audio
+        filter_complex = (
             f"[1:a]volume={speech_volume}[a1];"
             f"[2:a]volume={bg_volume}[a2];"
-            f"[a1][a2]amix=inputs=2:duration=first:dropout_transition=2[aout]",
-            "-map", "0:v:0",                # Lấy luồng video từ file 0
+            f"[a1][a2]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+        )
+
+        # Xử lý Video Filter (Mirror)
+        if mirror_video:
+            filter_complex = f"[0:v]hflip[vout];" + filter_complex
+            cmd.extend([
+                "-filter_complex", filter_complex,
+                "-map", "[vout]",
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "22"
+            ])
+        else:
+            cmd.extend([
+                "-filter_complex", filter_complex,
+                "-map", "0:v:0",
+                "-c:v", "copy"
+            ])
+
+        cmd.extend([
             "-map", "[aout]",               # Lấy luồng audio đã hòa trộn
-            "-c:v", "copy",                 # Giữ nguyên codec video
             "-c:a", "aac",
             "-b:a", "192k",
             str(output_path)
-        ]
+        ])
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
 
@@ -214,7 +265,12 @@ if __name__ == "__main__":
                 print(f"🔍 Đang chạy test AudioVideoMerger trên folder: {target_folder.name}\n")
 
                 merger = AudioVideoMerger()
-                final_file = merger.merge_audio_video(json_path=target_json, verbose=True)
+                # Thử truyền mirror_video=True để test lật gương
+                final_file = merger.merge_audio_video(
+                    json_path=target_json, 
+                    mirror_video=True, 
+                    verbose=True
+                )
             else:
                 print(f"❌ Không tìm thấy 'info.json' trong: {target_folder}")
         else:

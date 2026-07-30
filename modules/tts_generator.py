@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 import numpy as np
+import torch
 from pydub import AudioSegment
 from vieneu import Vieneu
 
@@ -33,8 +34,9 @@ def condense_vietnamese_text(text: str) -> str:
     for filler in filler_words:
         clean_txt = re.sub(filler, "", clean_txt, flags=re.IGNORECASE)
 
+    # Đã sửa lỗi .substitute() của chuỗi str
     for tag in tags:
-        clean_txt = clean_txt.substitute("__TAG__", tag) if hasattr(clean_txt, 'substitute') else clean_txt.replace("__TAG__", tag, 1)
+        clean_txt = clean_txt.replace("__TAG__", tag, 1)
 
     return re.sub(r"\s+", " ", clean_txt).strip()
 
@@ -66,7 +68,7 @@ def process_audio_smooth(
 
 
 class SegmentTTSGenerator:
-    """Class tạo giọng đọc AI tiếng Việt theo từng segment (Sử dụng Vieneu trên GPU)."""
+    """Class tạo giọng đọc AI tiếng Việt theo từng segment (Hỗ trợ ONNX & Profile Clone .pt trên GPU)."""
 
     def __init__(
         self, 
@@ -75,9 +77,9 @@ class SegmentTTSGenerator:
         sample_rate: int = 48000,
         max_words_per_sec: float = 4.0,
         pad_tail_ms: int = 150,
-        volume_gain_db: float = 2.0,  # 👈 THÊM THAM SỐ TÙY CHỈNH ÂM LƯỢNG (dB)
+        volume_gain_db: float = 2.0,
         enable_clone: bool = False,
-        ref_audio_path: Optional[Path] = None,
+        ref_audio_path: Optional[Path] = None,  # Đường dẫn tới file adam_voice.pt hoặc file wav
         vieneu_instance: Optional[Vieneu] = None
     ):
         self.voice = voice if voice else getattr(config, "DEFAULT_VOICE", "Minh Đức")
@@ -85,15 +87,19 @@ class SegmentTTSGenerator:
         self.sample_rate = sample_rate
         self.max_words_per_sec = max_words_per_sec
         self.pad_tail_ms = pad_tail_ms
-        self.volume_gain_db = volume_gain_db  # Lưu tham số khuếch đại âm lượng
+        self.volume_gain_db = volume_gain_db
         self.enable_clone = enable_clone
         self.ref_audio_path = Path(ref_audio_path) if ref_audio_path else None
 
-        # Sử dụng ONNX backend làm mặc định nếu không truyền vieneu_instance
-        self.vieneu = vieneu_instance if vieneu_instance is not None else Vieneu(backend="onnx")
-        
+        # Khởi tạo Vieneu: Ưu tiên dùng instance truyền vào, nếu không dùng Vieneu với CUDA/ONNX
+        if vieneu_instance is not None:
+            self.vieneu = vieneu_instance
+        else:
+            # Nếu dùng clone qua file .pt thì nên ưu tiên CUDA backbone
+            self.vieneu = Vieneu(backbone_device="cuda")
+
     def generate_speech_for_segments(self, json_path: Path, verbose: bool = True) -> List[Dict[str, Any]]:
-        """Đọc info.json, tối ưu văn bản, sinh giọng đọc Vieneu MP3 (Mặc định hoặc Clone) và cập nhật lại file JSON."""
+        """Đọc info.json, tối ưu văn bản, sinh giọng đọc Vieneu MP3 và cập nhật lại file JSON."""
         json_path = Path(json_path)
         if not json_path.exists():
             raise FileNotFoundError(f"❌ Không tìm thấy file JSON tại: {json_path}")
@@ -130,7 +136,9 @@ class SegmentTTSGenerator:
             if duration > 0.5 and (word_count / duration) > self.max_words_per_sec:
                 if verbose:
                     print(f"⚠️ [Seg {seg.get('id')}] Phát hiện nguy cơ méo tiếng ({word_count} từ / {duration:.1f}s). Đang tự động rút gọn...")
-                vi_text = condense_vietnamese_text(vi_text)
+                condensed = condense_vietnamese_text(vi_text)
+                if condensed:
+                    vi_text = condensed
 
             if not vi_text.endswith((".", "!", "?", "...", "]")):
                 vi_text += "."
@@ -144,29 +152,51 @@ class SegmentTTSGenerator:
                 print("⚠️ Không có câu thoại nào hợp lệ để tạo giọng đọc!")
             return segments
 
-        # Phân nhánh xử lý: Giọng Clone hoặc Giọng Mặc Định
+        # =========================================================================
+        # PHẦN TÍCH HỢP CODE 2: XỬ LÝ VOICE CLONE BẰNG FILE PROFILE (.pt)
+        # =========================================================================
         if self.enable_clone and self.ref_audio_path and self.ref_audio_path.exists():
             if verbose:
-                print(f"🎭 [Vieneu Clone TTS] Bắt đầu nhái giọng từ mẫu: {self.ref_audio_path.name}...")
-            
-            raw_audios = self.vieneu.infer_batch(
-                text_list, 
-                ref_audio=str(self.ref_audio_path),
-                style=self.style
-            )
+                print(f"🎭 [Vieneu Clone TTS] Đang nạp profile giọng từ: {self.ref_audio_path.name}...")
+
+            # Kiểm tra nếu file là .pt (Voice Profile chứa ref_codes & ref_text)
+            if self.ref_audio_path.suffix.lower() == ".pt":
+                profile = torch.load(
+                    self.ref_audio_path,
+                    map_location="cpu",
+                    weights_only=False
+                )
+                ref_codes = profile.get("codes")
+                ref_text = profile.get("text")
+
+                # Vì infer_batch hỗ trợ truyền danh sách text kết hợp ref_codes & ref_text
+                raw_audios = self.vieneu.infer_batch(
+                    text_list,
+                    ref_codes=ref_codes,
+                    ref_text=ref_text,
+                    style=self.style
+                )
+            else:
+                # Nếu là file audio thông thường (.wav, .mp3)
+                raw_audios = self.vieneu.infer_batch(
+                    text_list,
+                    ref_audio=str(self.ref_audio_path),
+                    style=self.style
+                )
         else:
             if self.enable_clone and verbose:
-                print("⚠️ Không tìm thấy file audio mẫu clone, tự động chuyển về giọng mặc định!")
-                
+                print("⚠️ Không tìm thấy file audio/profile mẫu clone, chuyển về giọng mặc định!")
+
             if verbose:
-                print(f"🔊 [Vieneu Standard TTS] Tạo {len(text_list)} segments ({self.voice}) trên GPU...")
+                print(f"🔊 [Vieneu Standard TTS] Tạo {len(text_list)} segments ({self.voice})...")
 
             raw_audios = self.vieneu.infer_batch(
-                text_list, 
-                voice=self.voice, 
+                text_list,
+                voice=self.voice,
                 style=self.style
             )
 
+        # Xuất file âm thanh và cập nhật JSON
         for seg, wave in zip(valid_segments, raw_audios):
             seg_id = seg.get("id", 0)
             output_filename = f"vi_seg_{seg_id:03d}.mp3"
@@ -178,38 +208,30 @@ class SegmentTTSGenerator:
                 pad_tail_ms=self.pad_tail_ms
             )
 
-            # =========================================================================
-            # BỔ SUNG 1: Tăng âm lượng voice dựa trên tham số volume_gain_db
-            # =========================================================================
+            # 1. Tăng/Giảm âm lượng (dB)
             if self.volume_gain_db != 0:
                 smooth_audio = smooth_audio + self.volume_gain_db
 
-            # =========================================================================
-            # BỔ SUNG 2: Căn sát đuôi (Right-align) cho Segment 0 (Xử lý khoảng lặng đầu)
-            # =========================================================================
+            # 2. Căn sát đuôi (Right-align) cho Segment 0
             if seg_id == 0:
                 seg_start = float(seg.get("start", 0.0))
                 seg_end = float(seg.get("end", 0.0))
                 slot_duration_ms = int((seg_end - seg_start) * 1000)
-                
                 tts_duration_ms = len(smooth_audio)
 
-                # Nếu thời lượng khung Segment 0 dài hơn file âm thanh TTS sinh ra
                 if slot_duration_ms > tts_duration_ms:
                     lead_silence_ms = slot_duration_ms - tts_duration_ms
                     if verbose:
-                        print(f"🎯 [Seg 0] Phát hiện khoảng lặng đầu! Chèn {lead_silence_ms / 1000:.2f}s silence vào trước giọng đọc.")
+                        print(f"🎯 [Seg 0] Căn chỉnh khoảng lặng đầu: {lead_silence_ms / 1000:.2f}s")
                     
-                    # Tạo khoảng lặng bằng pydub và nối vào ĐẦU của smooth_audio
                     lead_silence = AudioSegment.silent(duration=lead_silence_ms, frame_rate=self.sample_rate)
                     smooth_audio = lead_silence + smooth_audio
-            # =========================================================================
 
             smooth_audio.export(str(output_filepath), format="mp3", bitrate="192k")
             seg["translated_audio_file"] = f"translated_audio_segments/{output_filename}"
 
             if verbose:
-                print(f"   ✨ [Seg {seg_id}] Đã xuất MP3 mượt (Gain: +{self.volume_gain_db}dB): {output_filename}")
+                print(f"   ✨ [Seg {seg_id}] Đã xuất MP3 mượt (Gain: {self.volume_gain_db:+}dB): {output_filename}")
 
         data["segments"] = segments
         data["status"] = "tts_generated"

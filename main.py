@@ -2,6 +2,7 @@ import sys
 import shutil
 import argparse
 from pathlib import Path
+from typing import List, Tuple, Optional
 from vieneu import Vieneu
 
 # Import các thông số cấu hình từ config.py
@@ -15,11 +16,61 @@ from modules.tts_generator import SegmentTTSGenerator
 from modules.audio_video_merger import AudioVideoMerger
 
 
-def process_video_pipeline(video_url: str, enable_clone: bool = False, vieneu_instance: Vieneu = None):
+def scan_available_voices(voices_dir: Path = Path("voices")) -> List[Path]:
+    """Quét thư mục voices/ để lấy danh sách các file giọng đọc (.pt, .wav, .mp3)."""
+    if not voices_dir.exists():
+        voices_dir.mkdir(parents=True, exist_ok=True)
+        return []
+
+    valid_extensions = {".pt", ".wav", ".mp3"}
+    voice_files = [
+        f for f in voices_dir.iterdir() 
+        if f.is_file() and f.suffix.lower() in valid_extensions
+    ]
+    return sorted(voice_files, key=lambda x: x.name)
+
+
+def select_voice_interactive(voice_files: List[Path]) -> Tuple[Optional[Path], str]:
+    """Hiển thị danh sách giọng đọc sẵn có và cho phép người dùng lựa chọn."""
+    print("\n" + "=" * 50)
+    print("🎙️ DANH SÁCH GIỌNG ĐỌC SẴN CÓ (Thư mục voices/)")
+    print("=" * 50)
+
+    # Lựa chọn 0: Sử dụng giọng đọc mặc định của hệ thống
+    default_voice_name = getattr(config, "DEFAULT_VOICE", "Minh Đức")
+    print(f"  [0] Giọng mặc định hệ thống ({default_voice_name})")
+
+    for idx, voice_path in enumerate(voice_files, start=1):
+        file_type = "Profile (.pt)" if voice_path.suffix.lower() == ".pt" else "Audio (.wav/.mp3)"
+        print(f"  [{idx}] {voice_path.stem} [{file_type}]")
+
+    print("=" * 50)
+
+    while True:
+        choice = input(f"👉 Chọn giọng đọc (0-{len(voice_files)}) [Mặc định 0]: ").strip()
+        
+        if not choice or choice == "0":
+            return None, default_voice_name
+
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(voice_files):
+                selected_file = voice_files[idx - 1]
+                return selected_file, selected_file.stem
+
+        print("⚠️ Lựa chọn không hợp lệ, vui lòng nhập lại!")
+
+
+def process_video_pipeline(
+    video_url: str, 
+    selected_voice_path: Optional[Path] = None,
+    selected_voice_name: str = "Minh Đức",
+    vieneu_instance: Vieneu = None
+):
     """Luồng xử lý tự động chuyển đổi video từ Link sang Video Tiếng Việt lồng tiếng hoàn chỉnh."""
     print("=" * 70)
     print("🚀 BẮT ĐẦU TIẾN TRÌNH TỰ ĐỘNG TẠO VIDEO LỒNG TIẾNG TIẾNG VIỆT")
-    print(f"🎭 Chế độ Nhái Giọng (Voice Clone): {'BẬT' if enable_clone else 'TẮT'}")
+    print(f"🎙️ Giọng đọc sử dụng: {selected_voice_name}")
     print("=" * 70)
     print(f"🔗 Link Video: {video_url}\n")
 
@@ -44,7 +95,7 @@ def process_video_pipeline(video_url: str, enable_clone: bool = False, vieneu_in
         # BƯỚC 1.5: Tách Nhạc Nền / Hiệu Ứng Gốc Bằng Demucs (Meta AI)
         # -----------------------------------------------------------------
         print("📌 [1.5/6] Tách nhạc nền & hiệu ứng âm thanh bằng Demucs...")
-        bg_volume = getattr(config, "BG_VOLUME", 0.5)  # Giảm xuống 50% mặc định
+        bg_volume = getattr(config, "BG_VOLUME", 0.5)
         try:
             downloader.separate_background_audio(
                 audio_or_video_path=video_path, 
@@ -78,23 +129,16 @@ def process_video_pipeline(video_url: str, enable_clone: bool = False, vieneu_in
         # BƯỚC 4: Tạo giọng đọc AI tiếng Việt mượt mà bằng Vieneu (GPU)
         # -----------------------------------------------------------------
         print("📌 [4/6] Tạo file âm thanh lồng tiếng AI (Vieneu TTS)...")
-        tts_voice = getattr(config, "DEFAULT_VOICE", "Minh Đức")
         tts_style = getattr(config, "DEFAULT_STYLE", "tu_nhien")
 
-        ref_audio_path = None
-        if enable_clone:
-            ref_filename = getattr(config, "REF_AUDIO_FILENAME", "ref.wav")
-            ref_duration = getattr(config, "REF_AUDIO_DURATION", 10.0)
-            ref_audio_path = temp_folder / ref_filename
-            print(f"🎙️ Đang trích xuất {ref_duration}s âm thanh gốc làm mẫu nhái giọng...")
-            downloader.extract_reference_audio(audio_file_path, ref_audio_path, duration=ref_duration)
+        # Cấu hình chế độ clone từ file giọng đã chọn (nếu có)
+        enable_clone = selected_voice_path is not None and selected_voice_path.exists()
 
-        # Tái sử dụng instance vieneu_instance đã load sẵn
         tts = SegmentTTSGenerator(
-            voice=tts_voice, 
+            voice=selected_voice_name, 
             style=tts_style,
             enable_clone=enable_clone,
-            ref_audio_path=ref_audio_path,
+            ref_audio_path=selected_voice_path,
             vieneu_instance=vieneu_instance,
             volume_gain_db=4.0
         )
@@ -105,7 +149,7 @@ def process_video_pipeline(video_url: str, enable_clone: bool = False, vieneu_in
         # -----------------------------------------------------------------
         print("📌 [5/6] Căn chỉnh timeline và gộp video thành phẩm...")
         merger = AudioVideoMerger()
-        temp_final_video = merger.merge_audio_video(json_path, verbose=True)
+        merger.merge_audio_video(json_path, verbose=True)
 
         # -----------------------------------------------------------------
         # DỌN DẸP & DỜI THÀNH PHẨM SANG THƯ MỤC OUTPUT
@@ -144,35 +188,23 @@ def main():
         type=str, 
         help="Đường dẫn URL của video (YouTube, Facebook, TikTok, ...)"
     )
-    parser.add_argument(
-        "--clone", "-c",
-        type=int,
-        choices=[0, 1],
-        help="Bật nhái giọng nhân vật (1: Bật, 0: Tắt)"
-    )
     args = parser.parse_args()
 
-    # Xác định backend khởi tạo Vieneu
-    backend_type = "onnx" if args.clone is not None else "pytorch"
-    
     print("=" * 70)
     print("🎥 HỆ THỐNG TỰ ĐỘNG DỊCH VÀ LỒNG TIẾNG VIDEO (VIENEU TTS)")
     print("=" * 70)
-    print(f"⚙️ Đang khởi tạo mô hình Vieneu TTS ({backend_type.upper()}) dùng chung cho mọi tiến trình...")
+    print("⚙️ Đang khởi tạo mô hình Vieneu TTS trên GPU...")
     
-    # 1. KHỞI TẠO MODEL 1 LẦN DUY NHẤT
-    vieneu_instance = Vieneu(backend=backend_type)
+    # Khởi tạo mô hình 1 lần duy nhất trên GPU CUDA
+    vieneu_instance = Vieneu(backbone_device="cuda")
     print("✅ Load Model Vieneu thành công vào VRAM/RAM!\n")
 
-    # Nếu truyền sẵn URL từ CLI arguments thì xử lý ngay lượt đầu
     first_run_url = args.url
-    first_run_clone = True if args.clone == 1 else False
 
-    # 2. VÒNG LẶP XỬ LÝ NHIỀU VIDEO CONTINUOUSLY
+    # VÒNG LẶP XỬ LÝ NHIỀU VIDEO CONTINUOUSLY
     while True:
         if first_run_url:
             video_url = first_run_url
-            enable_clone = first_run_clone
             first_run_url = None  # Reset lại sau khi dùng lần đầu
         else:
             print("-" * 70)
@@ -186,13 +218,17 @@ def main():
                 print("⚠️ Link video không được để trống!")
                 continue
 
-            user_clone = input("👉 Bật nhái giọng Voice Clone? (1: Có, 0: Không) [Mặc định 0]: ").strip()
-            enable_clone = True if user_clone == "1" else False
+        # 1. Quét danh sách file giọng trong thư mục voices/
+        voice_files = scan_available_voices(Path("voices"))
 
-        # Thực thi pipeline xử lý video (dùng lại vieneu_instance)
+        # 2. Cho người dùng tương tác chọn giọng đọc
+        selected_voice_path, selected_voice_name = select_voice_interactive(voice_files)
+
+        # 3. Thực thi pipeline xử lý video
         process_video_pipeline(
             video_url=video_url, 
-            enable_clone=enable_clone, 
+            selected_voice_path=selected_voice_path,
+            selected_voice_name=selected_voice_name,
             vieneu_instance=vieneu_instance
         )
 
